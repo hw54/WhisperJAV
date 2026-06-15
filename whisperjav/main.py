@@ -256,6 +256,9 @@ def parse_arguments():
     twopass_group.add_argument("--ensemble-serial", action="store_true",
                                help="Complete each file (Pass1+Pass2+Merge) before starting the next. "
                                     "Slower (reloads models per file) but delivers results incrementally.")
+    twopass_group.add_argument("--allow-rocm-batch", action="store_true",
+                               help="Advanced/debug: allow multi-file ROCm + WhisperSeg batches to share one "
+                                    "pass worker instead of automatic per-file process isolation.")
 
     # BYOP (Bring Your Own Provider) — external ASR tool integration
     byop_group = parser.add_argument_group("BYOP — Bring Your Own Provider")
@@ -2266,6 +2269,7 @@ def main():
                 parameter_tracer=tracer,
                 log_level=log_level,
                 serial_file_processing=getattr(args, 'ensemble_serial', False),
+                allow_rocm_batch=getattr(args, 'allow_rocm_batch', False),
             )
 
             # Process all files with batch processing for optimal VRAM usage

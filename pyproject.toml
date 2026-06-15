@@ -255,6 +255,17 @@ whisperseg-rocm = [
     "onnxruntime-rocm>=1.22.2",
 ]
 
+# WhisperSeg MIGraphX variant — preferred for ROCm 7.1+ AMD GPUs.
+# Install with uv (uses [tool.uv.sources]):
+#   uv sync --extra whisperseg-migraphx
+# Or with pip:
+#   pip install onnxruntime-migraphx -f https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.1/
+# Do NOT install alongside whisperseg, whisperseg-gpu, or whisperseg-rocm.
+whisperseg-migraphx = [
+    "whisperjav[huggingface]",
+    "onnxruntime-migraphx>=1.23.2",
+]
+
 # Qwen3-ASR support (v1.8.3+)
 # Install with: pip install whisperjav[qwen]
 # Note: Requires huggingface extra for transformers backend
@@ -474,6 +485,11 @@ name = "pytorch"
 url = "https://download.pytorch.org/whl/cu128"
 explicit = true  # Only torch/torchaudio use this index, not numpy/scipy/etc.
 
+[[tool.uv.index]]
+name = "rocm"
+url = "https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.1/"
+explicit = true  # Only onnxruntime-migraphx uses this index.
+
 [tool.uv.sources]
 # macOS gets torch from default PyPI (has built-in MPS support for Apple Silicon)
 # Linux/Windows get torch from the named pytorch CUDA index
@@ -482,4 +498,7 @@ torch = [
 ]
 torchaudio = [
     { index = "pytorch", marker = "sys_platform != 'darwin'" },
+]
+onnxruntime-migraphx = [
+    { index = "rocm", marker = "sys_platform == 'linux'" },
 ]

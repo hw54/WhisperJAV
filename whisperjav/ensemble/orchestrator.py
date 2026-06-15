@@ -20,6 +20,84 @@ from .pass_worker import WorkerPayload, run_pass_worker
 from .utils import resolve_language_code
 
 
+_ROCM_ONNX_PROVIDERS = frozenset({"MIGraphXExecutionProvider", "ROCMExecutionProvider"})
+
+
+def _torch_rocm_runtime_available() -> bool:
+    """Return True when the active PyTorch runtime is ROCm/HIP and usable."""
+    try:
+        import torch
+    except Exception:
+        return False
+
+    hip_version = getattr(torch.version, "hip", None)
+    if not hip_version:
+        return False
+
+    try:
+        return bool(torch.cuda.is_available())
+    except Exception:
+        return False
+
+
+def _rocm_onnx_provider_available() -> bool:
+    """Return True when ONNX Runtime exposes a ROCm-capable provider."""
+    try:
+        import onnxruntime as ort
+    except Exception:
+        return False
+
+    try:
+        providers = set(ort.get_available_providers())
+    except Exception:
+        return False
+
+    return bool(providers & _ROCM_ONNX_PROVIDERS)
+
+
+def _normalise_backend_name(value: Any) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip().lower()
+    return stripped or None
+
+
+def _pass_uses_whisperseg(pass_config: Optional[Dict[str, Any]]) -> bool:
+    """Return True when a pass is configured to instantiate WhisperSeg."""
+    if not pass_config:
+        return False
+
+    explicit_segmenter = _normalise_backend_name(pass_config.get("speech_segmenter"))
+    if explicit_segmenter is not None:
+        return explicit_segmenter == "whisperseg"
+
+    if pass_config.get("pipeline") != "qwen":
+        return False
+
+    qwen_params = pass_config.get("qwen_params") or {}
+    if isinstance(qwen_params, dict):
+        qwen_segmenter = _normalise_backend_name(qwen_params.get("qwen_segmenter"))
+        if qwen_segmenter is not None:
+            return qwen_segmenter == "whisperseg"
+
+    # QwenPipeline currently defaults to WhisperSeg via DEFAULT_QWEN_PARAMS.
+    return True
+
+
+def _requires_rocm_process_isolation(
+    pass1_config: Dict[str, Any],
+    pass2_config: Optional[Dict[str, Any]],
+) -> bool:
+    """Detect the ROCm + WhisperSeg batch mode that needs per-file workers."""
+    if not (
+        _pass_uses_whisperseg(pass1_config)
+        or _pass_uses_whisperseg(pass2_config)
+    ):
+        return False
+
+    return _torch_rocm_runtime_available() and _rocm_onnx_provider_available()
+
+
 class EnsembleOrchestrator:
     """Orchestrates two-pass ensemble processing with result merging."""
 
@@ -32,6 +110,7 @@ class EnsembleOrchestrator:
         progress_display=None,
         log_level: str = "INFO",
         serial_file_processing: bool = False,
+        allow_rocm_batch: bool = False,
         **kwargs
     ):
         """
@@ -47,6 +126,8 @@ class EnsembleOrchestrator:
             serial_file_processing: If True, each file completes its full cycle
                 (Pass 1 → Pass 2 → Merge) before the next file begins. Slower
                 (reloads models per file) but delivers results incrementally.
+            allow_rocm_batch: If True, do not auto-enable per-file process
+                isolation for ROCm + WhisperSeg/MIGraphX batch runs.
             **kwargs: Additional parameters passed to pipelines
         """
         # "source" sentinel means each file's SRT goes next to its input file
@@ -67,6 +148,7 @@ class EnsembleOrchestrator:
         self.progress_display = progress_display
         self.log_level = log_level
         self.serial_file_processing = serial_file_processing
+        self.allow_rocm_batch = allow_rocm_batch
         self.extra_kwargs = kwargs
         self.worker_kwargs = self._filter_picklable_kwargs(kwargs)
 
@@ -109,10 +191,30 @@ class EnsembleOrchestrator:
 
         # Serial mode: each file completes Pass1→Pass2→Merge before the next starts.
         # Single-file batches always take the batch path (identical result, no overhead).
-        if self.serial_file_processing and len(media_files) > 1:
-            return self._process_batch_serial(
-                media_files, pass1_config, pass2_config, merge_strategy,
+        if len(media_files) > 1:
+            if self.serial_file_processing:
+                return self._process_batch_serial(
+                    media_files, pass1_config, pass2_config, merge_strategy,
+                )
+
+            rocm_isolation_required = _requires_rocm_process_isolation(
+                pass1_config, pass2_config
             )
+            if rocm_isolation_required and not self.allow_rocm_batch:
+                logger.warning(
+                    "ROCm ONNX provider + WhisperSeg detected; enabling per-file "
+                    "process isolation for ensemble batch. This keeps MIGraphX/ROCm "
+                    "GPU contexts one-shot and avoids native HIP state carrying from "
+                    "one video into the next. Use --allow-rocm-batch only for debugging."
+                )
+                return self._process_batch_serial(
+                    media_files, pass1_config, pass2_config, merge_strategy,
+                )
+            if rocm_isolation_required:
+                logger.warning(
+                    "ROCm batch process isolation disabled by --allow-rocm-batch; "
+                    "a native MIGraphX/ROCm crash can abort the whole pass worker."
+                )
 
         batch_start = time.time()
         serialized_media = self._serialize_media_files(media_files)

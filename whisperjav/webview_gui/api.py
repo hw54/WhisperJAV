@@ -7,7 +7,11 @@ Completely decoupled from UI - can be tested standalone.
 """
 
 import json
+import grp
 import os
+import pwd
+import shlex
+import shutil
 import sys
 import time
 import queue
@@ -60,6 +64,39 @@ def _compute_default_output_dir() -> Path:
 
 
 DEFAULT_OUTPUT = _compute_default_output_dir()
+
+
+def _current_username() -> str:
+    """Return the username for render-group membership checks."""
+    return os.environ.get("USER") or pwd.getpwuid(os.getuid()).pw_name
+
+
+def _should_use_render_group() -> bool:
+    """Detect stale Linux sessions that need `sg render` for ROCm devices."""
+    if os.name != "posix" or sys.platform == "darwin":
+        return False
+    if shutil.which("sg") is None:
+        return False
+
+    try:
+        render_group = grp.getgrnam("render")
+    except KeyError:
+        return False
+
+    active_gids = {*os.getgroups(), os.getgid(), os.getegid()}
+    if render_group.gr_gid in active_gids:
+        return False
+
+    return _current_username() in render_group.gr_mem
+
+
+def _wrap_command_for_render_group(cmd: List[str]) -> List[str]:
+    """Run GUI child commands under render group when ROCm access needs it."""
+    if not _should_use_render_group():
+        return cmd
+
+    quoted = " ".join(shlex.quote(arg) for arg in cmd)
+    return ["sg", "render", "-c", quoted]
 
 
 class WhisperJAVAPI:
@@ -392,8 +429,9 @@ class WhisperJAVAPI:
             self.log_queue.put(f"\n> {cmd_display}\n")
 
             # Start subprocess
+            launch_cmd = _wrap_command_for_render_group(cmd)
             self.process = subprocess.Popen(
-                cmd,
+                launch_cmd,
                 cwd=str(REPO_ROOT),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -1539,8 +1577,9 @@ class WhisperJAVAPI:
             self.log_queue.put(f"\n> {cmd_display}\n")
 
             # Start subprocess
+            launch_cmd = _wrap_command_for_render_group(cmd)
             self.process = subprocess.Popen(
-                cmd,
+                launch_cmd,
                 cwd=str(REPO_ROOT),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -2414,8 +2453,9 @@ class WhisperJAVAPI:
             self.log_queue.put(f"\n> {cmd_display}\n")
 
             # Start subprocess
+            launch_cmd = _wrap_command_for_render_group(cmd)
             self.process = subprocess.Popen(
-                cmd,
+                launch_cmd,
                 cwd=str(REPO_ROOT),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,

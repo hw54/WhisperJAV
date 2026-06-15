@@ -16,7 +16,8 @@ file at repo root for full attribution.
 Installation:
     pip install whisperjav[whisperseg]              # CPU
     pip install whisperjav[whisperseg-gpu]          # CUDA via onnxruntime-gpu
-    pip install whisperjav[whisperseg-rocm]         # ROCm via onnxruntime-rocm
+    pip install whisperjav[whisperseg-migraphx]     # ROCm 7 via onnxruntime-migraphx
+    pip install whisperjav[whisperseg-rocm]         # Legacy ROCm EP
 
 Reference:
     Gu et al., "WhisperSeg: Positive Transfer of the Whisper Speech
@@ -66,10 +67,36 @@ def _select_ort_providers(
     if "CUDAExecutionProvider" in available_providers:
         return ["CUDAExecutionProvider", "CPUExecutionProvider"], "GPU (CUDA)"
 
+    if "MIGraphXExecutionProvider" in available_providers:
+        return ["MIGraphXExecutionProvider", "CPUExecutionProvider"], "GPU (MIGraphX)"
+
     if "ROCMExecutionProvider" in available_providers:
         return ["ROCMExecutionProvider", "CPUExecutionProvider"], "GPU (ROCm)"
 
     return ["CPUExecutionProvider"], "CPU"
+
+
+def _assert_requested_provider_active(
+    requested_providers: List[str],
+    active_providers: List[str],
+    device_label: str,
+) -> None:
+    """Fail if ONNX Runtime silently drops a requested GPU provider."""
+    requested_primary = requested_providers[0] if requested_providers else None
+    if requested_primary in (None, "CPUExecutionProvider"):
+        return
+
+    if requested_primary in active_providers:
+        return
+
+    raise RuntimeError(
+        "WhisperSeg requested ONNX Runtime provider "
+        f"{requested_primary} for {device_label}, but the active providers are "
+        f"{active_providers}. ONNX Runtime likely failed to load GPU provider "
+        "dependencies. Install a CUDA/ROCm/MIGraphX runtime matching the "
+        "onnxruntime wheel, or explicitly set force_cpu=true if CPU execution "
+        "is intended."
+    )
 
 
 class WhisperSegSpeechSegmenter:
@@ -334,6 +361,11 @@ class WhisperSegSpeechSegmenter:
             try:
                 self._session = ort.InferenceSession(
                     model_path, providers=providers, sess_options=opts
+                )
+                _assert_requested_provider_active(
+                    providers,
+                    self._session.get_providers(),
+                    self._actual_device,
                 )
             except Exception as e:
                 logger.error(f"Failed to create WhisperSeg ONNX session: {e}")

@@ -80,6 +80,12 @@ class CheckResult:
     fatal: bool = False
 
 
+def _get_torch_rocm_version(torch_module) -> Optional[str]:
+    """Return the ROCm/HIP runtime version for ROCm PyTorch builds."""
+    hip_version = getattr(torch_module.version, "hip", None)
+    return hip_version if isinstance(hip_version, str) and hip_version else None
+
+
 class PreflightChecker:
     """Comprehensive environment checker for WhisperJAV."""
     
@@ -128,7 +134,7 @@ class PreflightChecker:
             ))
     
     def _check_cuda_availability(self):
-        """Check for CUDA availability - this is mandatory."""
+        """Check for PyTorch GPU availability - CUDA or ROCm is mandatory."""
         try:
             import torch
 
@@ -137,12 +143,14 @@ class PreflightChecker:
                 try:
                     device_count = torch.cuda.device_count()
                     device_name = torch.cuda.get_device_name(0)
-                    cuda_version = torch.version.cuda
+                    rocm_version = _get_torch_rocm_version(torch)
+                    runtime_name = "ROCm" if rocm_version else "CUDA"
+                    runtime_version = rocm_version or torch.version.cuda
 
                     self.results.append(CheckResult(
-                        name="CUDA Availability",
+                        name=f"{runtime_name} Availability",
                         status=CheckStatus.PASS,
-                        message=f"CUDA {cuda_version} available with {device_count} GPU(s)",
+                        message=f"{runtime_name} {runtime_version} available with {device_count} GPU(s)",
                         details=[f"Primary GPU: {device_name}"]
                     ))
                 except RuntimeError as e:
@@ -150,14 +158,14 @@ class PreflightChecker:
                     # Handle CUDA driver version mismatch
                     if "driver version is insufficient" in error_msg.lower():
                         self.results.append(CheckResult(
-                            name="CUDA Availability",
+                            name="GPU Availability",
                             status=CheckStatus.FAIL,
-                            message="CUDA driver version is too old",
+                            message="GPU driver version is too old",
                             details=[
-                                "Your NVIDIA driver is too old for the installed PyTorch CUDA version.",
+                                "Your GPU driver is too old for the installed PyTorch runtime.",
                                 "",
                                 "Solutions:",
-                                "1. Update NVIDIA drivers from: https://www.nvidia.com/drivers",
+                                "1. Update the GPU driver.",
                                 "2. Or reinstall PyTorch with CPU-only version:",
                                 "   pip uninstall torch torchvision torchaudio",
                                 "   pip install torch torchvision torchaudio",
@@ -169,24 +177,24 @@ class PreflightChecker:
                         ))
                     else:
                         self.results.append(CheckResult(
-                            name="CUDA Availability",
+                            name="GPU Availability",
                             status=CheckStatus.FAIL,
-                            message="CUDA initialization failed",
+                            message="GPU initialization failed",
                             details=[f"Error: {error_msg}"],
                             fatal=True
                         ))
             else:
                 # This is a fatal error for WhisperJAV
                 self.results.append(CheckResult(
-                    name="CUDA Availability",
+                    name="GPU Availability",
                     status=CheckStatus.FAIL,
-                    message="No CUDA-capable GPU detected",
+                    message="No CUDA/ROCm-capable GPU detected",
                     details=[
-                        "WhisperJAV requires an NVIDIA GPU with CUDA support and cuda enabled torch.",
+                        "WhisperJAV requires a GPU-enabled PyTorch runtime.",
                         "",
                         "Possible solutions:",
-                        "1. Ensure you have an CUDA version above 11.8 and CUDNN. ",
-                        "2. Ensure you have CUDA enabled torch and torchaudio installed. ",
+                        "1. Ensure your GPU driver/runtime is installed. ",
+                        "2. Ensure you have CUDA or ROCm enabled torch and torchaudio installed. ",
                         "3. Verify your torch is not CPU version. ",
                         "",
                     ],
@@ -194,23 +202,31 @@ class PreflightChecker:
                 ))
         except ImportError:
             self.results.append(CheckResult(
-                name="CUDA Availability",
+                name="GPU Availability",
                 status=CheckStatus.FAIL,
-                message="CUDA enabled PyTorch not installed",
+                message="GPU-enabled PyTorch not installed",
                 details=["Please complete installation first"],
                 fatal=True
             ))
     
     def _check_pytorch_cuda(self):
-        """Check PyTorch CUDA configuration."""
+        """Check PyTorch CUDA/ROCm configuration."""
         try:
             import torch
             
             if not torch.cuda.is_available():
                 return  # Already reported in CUDA check
+
+            rocm_version = _get_torch_rocm_version(torch)
+            if rocm_version:
+                self.results.append(CheckResult(
+                    name="PyTorch ROCm Build",
+                    status=CheckStatus.PASS,
+                    message=f"PyTorch compiled for ROCm {rocm_version}"
+                ))
             
             # Check if PyTorch was built with CUDA
-            if hasattr(torch, '_C') and hasattr(torch._C, '_cuda_getCompiledVersion'):
+            if not rocm_version and hasattr(torch, '_C') and hasattr(torch._C, '_cuda_getCompiledVersion'):
                 compiled_cuda = torch._C._cuda_getCompiledVersion()
                 runtime_cuda = torch.version.cuda
                 
@@ -247,16 +263,23 @@ class PreflightChecker:
             try:
                 test_tensor = torch.zeros(1).cuda()
                 del test_tensor
+                operation_name = "ROCm Operations" if rocm_version else "CUDA Operations"
+                operation_message = (
+                    "Basic ROCm operations working"
+                    if rocm_version
+                    else "Basic CUDA operations working"
+                )
                 self.results.append(CheckResult(
-                    name="CUDA Operations",
+                    name=operation_name,
                     status=CheckStatus.PASS,
-                    message="Basic CUDA operations working"
+                    message=operation_message
                 ))
             except Exception as e:
+                operation_name = "ROCm Operations" if rocm_version else "CUDA Operations"
                 self.results.append(CheckResult(
-                    name="CUDA Operations",
+                    name=operation_name,
                     status=CheckStatus.FAIL,
-                    message="CUDA operations failed",
+                    message=f"{'ROCm' if rocm_version else 'CUDA'} operations failed",
                     details=[str(e)],
                     fatal=True
                 ))

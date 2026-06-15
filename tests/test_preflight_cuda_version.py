@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import Mock, patch, MagicMock
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -14,6 +15,33 @@ from whisperjav.utils.preflight_check import PreflightChecker, CheckStatus
 
 class TestCudaVersionComparison(unittest.TestCase):
     """Test the CUDA version comparison logic."""
+
+    def test_rocm_build_reports_rocm_instead_of_cuda_mismatch(self):
+        """ROCm PyTorch uses torch.cuda APIs but has torch.version.hip, not cuda."""
+        cuda = SimpleNamespace(
+            is_available=lambda: True,
+        )
+        mock_tensor = MagicMock()
+        torch = SimpleNamespace(
+            cuda=cuda,
+            version=SimpleNamespace(cuda=None, hip="7.2.0"),
+            zeros=lambda *_args, **_kwargs: mock_tensor,
+        )
+        mock_tensor.cuda.return_value = mock_tensor
+
+        with patch.dict('sys.modules', {'torch': torch}):
+            checker = PreflightChecker(verbose=False)
+            checker._check_pytorch_cuda()
+
+        names = [result.name for result in checker.results]
+        self.assertIn("PyTorch ROCm Build", names)
+        self.assertNotIn("PyTorch CUDA Build", names)
+
+        rocm_result = next(
+            result for result in checker.results
+            if result.name == "PyTorch ROCm Build"
+        )
+        self.assertEqual(rocm_result.status, CheckStatus.PASS)
     
     def test_cuda_version_match_integer_to_string(self):
         """Test that integer compiled CUDA version matches string runtime version."""

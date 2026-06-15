@@ -635,16 +635,23 @@ class DecoupledPipeline(BasePipeline):
 
         # Convert Phase 4 speech regions: {idx: SegmentationResult} → List[List[Tuple]]
         orch_speech_regions = None
+        orch_speech_groups = None
         if speech_regions_per_scene:
             orch_speech_regions = []
+            orch_speech_groups = []
             for idx in range(len(scene_paths)):
                 if idx in speech_regions_per_scene:
                     seg_result = speech_regions_per_scene[idx]
                     orch_speech_regions.append(
                         [(s.start_sec, s.end_sec) for s in seg_result.segments]
                     )
+                    orch_speech_groups.append([
+                        [(s.start_sec, s.end_sec) for s in group]
+                        for group in seg_result.groups
+                    ])
                 else:
                     orch_speech_regions.append([])
+                    orch_speech_groups.append([])
 
         # Dual-track: orchestrator framer uses enhanced audio for framing
         orch_vad_paths = (
@@ -657,6 +664,7 @@ class DecoupledPipeline(BasePipeline):
             scene_audio_paths=orch_audio_paths,
             scene_durations=orch_durations,
             scene_speech_regions=orch_speech_regions,
+            scene_speech_groups=orch_speech_groups,
             vad_audio_paths=orch_vad_paths,
         )
 

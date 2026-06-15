@@ -5,13 +5,13 @@ Smart device detection for multi-platform GPU acceleration.
 Automatically detects and selects the best available compute device:
 - NVIDIA CUDA (highest priority for compatibility)
 - Apple Silicon MPS (Metal Performance Shaders)
-- AMD ROCm (detection only, limited support)
+- AMD ROCm via PyTorch HIP builds
 - CPU (fallback)
 
 This module enables WhisperJAV to run on:
 - NVIDIA GPUs (RTX 20/30/40/50 series, Blackwell, etc.)
 - Apple M1/M2/M3/M4/M5 chips
-- AMD GPUs (detection only, defer to CPU)
+- AMD GPUs via ROCm
 - CPU-only systems
 """
 
@@ -21,6 +21,12 @@ from typing import Dict, Optional, Tuple
 import logging
 
 from whisperjav.utils.logger import logger
+
+
+def _is_torch_rocm_build(torch_module) -> bool:
+    """Return True when PyTorch is a ROCm/HIP build."""
+    hip_version = getattr(torch_module.version, "hip", None)
+    return isinstance(hip_version, str) and bool(hip_version)
 
 
 def _check_cuda_available() -> Tuple[bool, Optional[str]]:
@@ -34,6 +40,9 @@ def _check_cuda_available() -> Tuple[bool, Optional[str]]:
     """
     try:
         import torch
+        if _is_torch_rocm_build(torch):
+            return False, None
+
         if torch.cuda.is_available():
             # get_device_name(0) can throw RuntimeError if driver is incompatible
             try:
@@ -85,20 +94,24 @@ def _check_rocm_available() -> Tuple[bool, Optional[str]]:
     """
     Check if AMD ROCm is available.
 
-    Note: ROCm detection only. WhisperJAV currently defers to CPU
-    due to CTranslate2 dependency limitations.
+    ROCm PyTorch builds intentionally expose GPU devices through the
+    ``torch.cuda`` API. WhisperJAV should still pass ``device="cuda"`` to
+    PyTorch-backed models when this returns True.
 
     Returns:
         (is_available, gpu_name)
     """
     try:
         import torch
-        # ROCm builds of PyTorch use 'cuda' backend but with AMD GPUs
+        # ROCm builds of PyTorch use the torch.cuda API but identify the
+        # runtime via torch.version.hip.
         if torch.cuda.is_available():
-            # Check if this is actually ROCm (not NVIDIA CUDA)
             try:
                 gpu_name = torch.cuda.get_device_name(0)
-                if 'AMD' in gpu_name.upper() or 'RADEON' in gpu_name.upper():
+                if _is_torch_rocm_build(torch):
+                    return True, gpu_name
+                gpu_name_upper = gpu_name.upper()
+                if 'AMD' in gpu_name_upper or 'RADEON' in gpu_name_upper:
                     return True, gpu_name
             except RuntimeError:
                 # Driver version mismatch - not ROCm
@@ -116,10 +129,11 @@ def get_best_device(prefer_cpu: bool = False) -> str:
     Priority order:
     1. CUDA (NVIDIA GPUs) - highest compatibility
     2. MPS (Apple Silicon) - native macOS GPU
-    3. CPU (fallback or explicit preference)
+    3. ROCm (AMD GPUs via PyTorch HIP builds)
+    4. CPU (fallback or explicit preference)
 
-    Note: ROCm (AMD GPUs) detected but deferred to CPU due to
-    CTranslate2 dependency limitations in faster-whisper pipeline.
+    Note: ROCm PyTorch builds use ``device="cuda"`` for AMD GPUs, so this
+    function returns "cuda" for both NVIDIA CUDA and ROCm acceleration.
 
     Args:
         prefer_cpu: Force CPU mode even if GPU available
@@ -147,13 +161,11 @@ def get_best_device(prefer_cpu: bool = False) -> str:
         logger.debug(f"MPS device detected: {mps_name}")
         return "mps"
 
-    # ROCm detection (informational only)
+    # Priority 3: AMD ROCm via PyTorch HIP builds
     rocm_available, rocm_name = _check_rocm_available()
     if rocm_available:
-        logger.warning(
-            f"AMD GPU detected ({rocm_name}), but ROCm support is limited. "
-            "Using CPU mode. See documentation for details."
-        )
+        logger.debug(f"ROCm device detected: {rocm_name}")
+        return "cuda"
 
     # Fallback: CPU
     logger.debug("No compatible GPU detected, using CPU")
@@ -236,7 +248,10 @@ def log_device_info():
     logger.info("Device Detection Report")
     logger.info("=" * 60)
     logger.info(f"Platform: {info['platform']}")
-    logger.info(f"Best Device: {info['best_device']}")
+    best_label = info['best_device']
+    if info['rocm']['available'] and best_label == "cuda":
+        best_label = "cuda (PyTorch ROCm)"
+    logger.info(f"Best Device: {best_label}")
     logger.info("")
 
     if info['cuda']['available']:
@@ -250,7 +265,7 @@ def log_device_info():
         logger.info("✗ Apple MPS: Not available")
 
     if info['rocm']['available']:
-        logger.info(f"⚠ AMD ROCm: {info['rocm']['name']} (detected but unsupported)")
+        logger.info(f"✓ AMD ROCm: {info['rocm']['name']} (PyTorch device='cuda')")
     else:
         logger.info("✗ AMD ROCm: Not available")
 

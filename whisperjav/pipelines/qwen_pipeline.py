@@ -76,6 +76,24 @@ class InputMode(Enum):
     VAD_SLICING = "vad_slicing"
 
 
+def _segment_vad_scenes(segmenter, vad_scene_paths: List[Tuple[str, float, float, float]]):
+    """Run Phase 4 speech segmentation and expose failures immediately."""
+    speech_regions_per_scene = {}
+    try:
+        total = len(vad_scene_paths)
+        for idx, (scene_path, _start_sec, _end_sec, _dur_sec) in enumerate(vad_scene_paths):
+            seg_result = segmenter.segment(scene_path, sample_rate=16000)
+            speech_regions_per_scene[idx] = seg_result
+            logger.debug(
+                "Phase 4: Scene %d/%d — %d speech segments (coverage=%.1f%%)",
+                idx + 1, total, len(seg_result.segments),
+                seg_result.speech_coverage_ratio * 100,
+            )
+        return speech_regions_per_scene
+    finally:
+        segmenter.cleanup()
+
+
 class QwenPipeline(BasePipeline):
     """
     Dedicated pipeline for Qwen3-ASR transcription.
@@ -761,20 +779,10 @@ class QwenPipeline(BasePipeline):
                 **segmenter_kwargs,
             )
 
-            for idx, (scene_path, start_sec, end_sec, dur_sec) in enumerate(_vad_scene_paths):
-                try:
-                    seg_result = segmenter.segment(scene_path, sample_rate=16000)
-                    speech_regions_per_scene[idx] = seg_result
-                    logger.debug(
-                        "Phase 4: Scene %d/%d — %d speech segments (coverage=%.1f%%)",
-                        idx + 1, len(_vad_scene_paths),
-                        len(seg_result.segments),
-                        seg_result.speech_coverage_ratio * 100,
-                    )
-                except Exception as e:
-                    logger.warning(f"Phase 4: Scene {idx + 1} segmentation failed: {e}, will transcribe full scene")
-
-            segmenter.cleanup()
+            speech_regions_per_scene = _segment_vad_scenes(
+                segmenter=segmenter,
+                vad_scene_paths=_vad_scene_paths,
+            )
             del segmenter
 
             master_metadata["stages"]["segmentation"] = {
@@ -816,16 +824,23 @@ class QwenPipeline(BasePipeline):
 
         # Convert Phase 4 speech regions: {idx: SegmentationResult} → List[List[Tuple]]
         orch_speech_regions = None
+        orch_speech_groups = None
         if speech_regions_per_scene:
             orch_speech_regions = []
+            orch_speech_groups = []
             for idx in range(len(scene_paths)):
                 if idx in speech_regions_per_scene:
                     seg_result = speech_regions_per_scene[idx]
                     orch_speech_regions.append(
                         [(s.start_sec, s.end_sec) for s in seg_result.segments]
                     )
+                    orch_speech_groups.append([
+                        [(s.start_sec, s.end_sec) for s in group]
+                        for group in seg_result.groups
+                    ])
                 else:
                     orch_speech_regions.append([])
+                    orch_speech_groups.append([])
 
         # Dual-track: orchestrator framer uses enhanced audio for framing
         orch_vad_paths = (
@@ -838,6 +853,7 @@ class QwenPipeline(BasePipeline):
             scene_audio_paths=orch_audio_paths,
             scene_durations=orch_durations,
             scene_speech_regions=orch_speech_regions,
+            scene_speech_groups=orch_speech_groups,
             vad_audio_paths=orch_vad_paths,
         )
 
@@ -1078,6 +1094,4 @@ class QwenPipeline(BasePipeline):
         self.cleanup_temp_files(media_basename)
 
         return master_metadata
-
-
 
