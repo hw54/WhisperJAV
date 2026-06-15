@@ -28,7 +28,7 @@
 - Create `whisperjav/batch/reports.py`: JSONL and summary report writer with redacted command records.
 - Create `whisperjav/batch/runners.py`: subprocess runner and fake-runner-friendly protocol.
 - Create `whisperjav/batch/scheduler.py`: one-ASR-at-a-time scheduler with bounded translation queue and cancellation handling.
-- Create `whisperjav/batch/cli.py`: Task 1 placeholder entry point; Task 6 replaces it with argparse integration and terminal summary.
+- Create `whisperjav/batch/cli.py`: Task 1 minimal explicit nonzero entry point; Task 6 replaces it with argparse integration and terminal summary.
 - Modify `pyproject.toml`: add `whisperjav-batch = "whisperjav.batch.cli:main"`.
 - Create `tests/test_batch_commands.py`.
 - Create `tests/test_batch_discovery.py`.
@@ -1104,8 +1104,8 @@ def test_report_writer_outputs_jsonl_and_summary_without_secrets(tmp_path):
         translation=ProcessResult(
             seconds=1.2,
             return_code=1,
-            command_redacted=["cmd", "--api-key", "<redacted>"],
-            api_key_source="cli",
+            command_redacted=["cmd", "--model", "deepseek-v4-flash"],
+            api_key_source="env",
             stderr_tail="bad request",
         ),
         error="translation failed",
@@ -1116,8 +1116,8 @@ def test_report_writer_outputs_jsonl_and_summary_without_secrets(tmp_path):
     row = json.loads(paths.jsonl.read_text(encoding="utf-8").splitlines()[0])
     summary = json.loads(paths.summary.read_text(encoding="utf-8"))
     assert row["status"] == "failed_translation"
-    assert row["translation"]["command_redacted"] == ["cmd", "--api-key", "<redacted>"]
-    assert row["translation"]["api_key_source"] == "cli"
+    assert row["translation"]["command_redacted"] == ["cmd", "--model", "deepseek-v4-flash"]
+    assert row["translation"]["api_key_source"] == "env"
     assert "secret" not in paths.jsonl.read_text(encoding="utf-8")
     assert summary["counts_by_status"] == {"failed_translation": 1}
     assert summary["input_root"] == str(tmp_path)
@@ -1146,9 +1146,9 @@ def test_summarize_results_totals_asr_and_translation_seconds(tmp_path):
     assert summary["total_translation_seconds"] == 4.0
 
 
-def test_completed_process_result_keeps_tail_and_redacted_command():
+def test_completed_process_result_keeps_tail_and_command_record():
     result = completed_process_result(
-        command=["cmd", "--api-key", "secret"],
+        command=["cmd", "--model", "deepseek-v4-flash"],
         return_code=7,
         seconds=1.0,
         stdout="line1\nline2",
@@ -1156,7 +1156,7 @@ def test_completed_process_result_keeps_tail_and_redacted_command():
     )
 
     assert result.return_code == 7
-    assert result.command_redacted == ("cmd", "--api-key", "<redacted>")
+    assert result.command_redacted == ("cmd", "--model", "deepseek-v4-flash")
     assert result.stdout_tail == "line1\nline2"
     assert result.stderr_tail == "err1\nerr2"
 
@@ -1272,7 +1272,7 @@ import sys
 import threading
 import time
 from collections import deque
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
 from .commands import redact_command
@@ -1286,7 +1286,7 @@ class SubprocessRunner:
     stream: bool = False
     _processes: list[subprocess.Popen] = field(default_factory=list, init=False, repr=False)
 
-    def run(self, command: Sequence[str]) -> ProcessResult:
+    def run(self, command: Sequence[str], *, env: Mapping[str, str] | None = None) -> ProcessResult:
         started = time.monotonic()
         process = subprocess.Popen(
             list(command),
@@ -1295,6 +1295,7 @@ class SubprocessRunner:
             text=True,
             encoding="utf-8",
             errors="replace",
+            env=env,
         )
         self._processes.append(process)
         stdout, stderr = self._communicate(process)
@@ -1427,7 +1428,7 @@ class FakeRunner:
         self.fail_translation = fail_translation
         self.commands = []
 
-    def run(self, command):
+    def run(self, command, *, env=None):
         self.commands.append(list(command))
         if "whisperjav.main" in command:
             if self.fail_asr:
@@ -1527,11 +1528,12 @@ Create `whisperjav/batch/scheduler.py`:
 ```python
 from __future__ import annotations
 
+import os
 from collections.abc import Iterable
 from dataclasses import replace
 from pathlib import Path
 
-from .commands import build_asr_command, build_translation_command, expected_translation_path
+from .commands import build_asr_command, build_translation_command, build_translation_env, expected_translation_path
 from .discovery import is_valid_srt
 from .models import BatchOptions, ClassifiedVideo, ProcessResult, VideoResult
 from .runners import SubprocessRunner
@@ -1616,8 +1618,10 @@ class BatchScheduler:
         )
 
     def _run_translation(self, japanese_srt: Path, actresses: tuple[str, ...]) -> ProcessResult:
-        result = self.runner.run(build_translation_command(japanese_srt, self.options, actresses=actresses))
-        api_key_source = "cli" if self.options.translate_api_key else "env"
+        command = build_translation_command(japanese_srt, self.options, actresses=actresses)
+        env = build_translation_env(self.options, base_env=os.environ)
+        result = self.runner.run(command, env=env)
+        api_key_source = "env" if self.options.translate_api_key else None
         return replace(result, api_key_source=api_key_source)
 
 
@@ -1673,7 +1677,7 @@ class OverlapRunner(FakeRunner):
         self.second_asr_started_after_translation = threading.Event()
         self.allow_first_translation_finish = threading.Event()
 
-    def run(self, command):
+    def run(self, command, *, env=None):
         if "whisperjav.main" in command:
             video = Path(command[4])
             if video.stem == "DEF-456":
@@ -1730,7 +1734,7 @@ class InterruptingRunner(FakeRunner):
         super().__init__(tmp_path)
         self.terminated = False
 
-    def run(self, command):
+    def run(self, command, *, env=None):
         raise KeyboardInterrupt
 
     def terminate_all(self):
@@ -2023,7 +2027,7 @@ Run:
 timeout 60s pytest tests/test_batch_cli.py -q
 ```
 
-Expected: FAIL because the Task 1 placeholder `whisperjav.batch.cli` does not yet implement `parse_args` or the batch CLI workflow.
+Expected: FAIL because the Task 1 minimal entry target `whisperjav.batch.cli` does not yet implement `parse_args` or the batch CLI workflow.
 
 - [ ] **Step 3: Implement CLI**
 
