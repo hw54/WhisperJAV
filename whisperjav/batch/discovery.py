@@ -5,8 +5,10 @@ from pathlib import Path
 from .commands import expected_translation_path
 from .models import BatchOptions, ClassifiedVideo
 
-VIDEO_EXTENSIONS = {".mp4", ".avi", ".mkv", ".mov", ".wmv", ".flv", ".webm", ".m4v", ".mpg", ".mpeg"}
-AUDIO_EXTENSIONS = {".mp3", ".wav", ".flac", ".aac", ".ogg", ".wma", ".m4a", ".m4b", ".opus"}
+VIDEO_EXTENSION_PRIORITY = (".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".webm", ".m4v", ".mpg", ".mpeg")
+AUDIO_EXTENSION_PRIORITY = (".m4a", ".m4b", ".mp3", ".wav", ".flac", ".aac", ".ogg", ".wma", ".opus")
+VIDEO_EXTENSIONS = set(VIDEO_EXTENSION_PRIORITY)
+AUDIO_EXTENSIONS = set(AUDIO_EXTENSION_PRIORITY)
 SUBTITLE_EXTENSIONS = {".srt", ".vtt", ".ass", ".ssa", ".sub"}
 WHISPERJAV_STEM_MARKERS = (".ja.pass1", ".ja.whisperjav", ".ja.merged.whisperjav")
 WHISPERJAV_SOURCE_SUFFIXES = tuple(f"{marker}.srt" for marker in WHISPERJAV_STEM_MARKERS)
@@ -19,15 +21,19 @@ def discover_media_files(root: Path, *, include_audio: bool = False) -> list[Pat
         extensions.update(AUDIO_EXTENSIONS)
 
     seen: set[Path] = set()
-    found: list[Path] = []
+    selected: dict[tuple[Path, str], Path] = {}
     for candidate in sorted(root.rglob("*")):
         if not candidate.is_file() or candidate.suffix.lower() not in extensions:
             continue
         resolved = candidate.resolve()
-        if resolved not in seen:
-            seen.add(resolved)
-            found.append(resolved)
-    return found
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        key = (candidate.parent.resolve(), candidate.stem)
+        current = selected.get(key)
+        if current is None or _media_priority(candidate) < _media_priority(current):
+            selected[key] = candidate
+    return [path.resolve() for path in sorted(selected.values())]
 
 
 def is_valid_srt(path: Path) -> bool:
@@ -36,6 +42,13 @@ def is_valid_srt(path: Path) -> bool:
         return False
     blocks = [block for block in text.split("\n\n") if " --> " in block]
     return len(blocks) >= 2
+
+
+def _media_priority(path: Path) -> tuple[int, int, str]:
+    suffix = path.suffix.lower()
+    if suffix in VIDEO_EXTENSIONS:
+        return (0, VIDEO_EXTENSION_PRIORITY.index(suffix), path.name)
+    return (1, AUDIO_EXTENSION_PRIORITY.index(suffix), path.name)
 
 
 def classify_video(video_path: Path, options: BatchOptions) -> ClassifiedVideo:

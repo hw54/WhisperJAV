@@ -31,12 +31,51 @@ def test_discovery_finds_videos_recursively_and_skips_audio_by_default(tmp_path)
 def test_discovery_can_include_audio(tmp_path):
     video = tmp_path / "ABC-123.mp4"
     audio = tmp_path / "ABC-123.mp3"
+    audio_only = tmp_path / "DEF-456.mp3"
     video.write_text("video")
     audio.write_text("audio")
+    audio_only.write_text("audio")
 
     found = discover_media_files(tmp_path, include_audio=True)
 
-    assert set(found) == {video.resolve(), audio.resolve()}
+    assert found == [video.resolve(), audio_only.resolve()]
+
+
+def test_discovery_deduplicates_same_stem_media_in_same_directory(tmp_path):
+    preferred = tmp_path / "ABC-123.mp4"
+    duplicate = tmp_path / "ABC-123.mkv"
+    preferred.write_text("video")
+    duplicate.write_text("video")
+
+    found = discover_media_files(tmp_path)
+
+    assert found == [preferred.resolve()]
+
+
+def test_discovery_keeps_different_stems_in_same_directory(tmp_path):
+    first = tmp_path / "ABC-123.mp4"
+    second = tmp_path / "DEF-456.mkv"
+    first.write_text("video")
+    second.write_text("video")
+
+    found = discover_media_files(tmp_path)
+
+    assert found == [first.resolve(), second.resolve()]
+
+
+def test_discovery_keeps_same_stem_media_in_different_directories(tmp_path):
+    first_dir = tmp_path / "first"
+    second_dir = tmp_path / "second"
+    first_dir.mkdir()
+    second_dir.mkdir()
+    first = first_dir / "ABC-123.mp4"
+    second = second_dir / "ABC-123.mkv"
+    first.write_text("video")
+    second.write_text("video")
+
+    found = discover_media_files(tmp_path)
+
+    assert found == [first.resolve(), second.resolve()]
 
 
 def test_discovery_deduplicates_canonical_paths(tmp_path):
