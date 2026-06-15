@@ -52,6 +52,15 @@ def test_actor_name_priority_and_case_insensitive_local_names(tmp_path):
     assert result.error is None
 
 
+def test_actor_with_empty_name_child_does_not_use_direct_text(tmp_path):
+    nfo = tmp_path / "ABC-123.nfo"
+    nfo.write_text("<movie><actor>Direct<name></name></actor></movie>", encoding="utf-8")
+
+    result = extract_actresses_from_nfo(nfo)
+
+    assert result.actresses == ()
+
+
 def test_direct_actor_text_when_no_child_name(tmp_path):
     nfo = tmp_path / "ABC-123.nfo"
     nfo.write_text("<movie><actor>Direct Actor</actor></movie>", encoding="utf-8")
@@ -64,13 +73,15 @@ def test_direct_actor_text_when_no_child_name(tmp_path):
 def test_cast_fields_split_and_deduplicate_in_order(tmp_path):
     nfo = tmp_path / "ABC-123.nfo"
     nfo.write_text(
-        "<movie><actress>A、B</actress><cast>B; C\nD</cast><performer>A</performer></movie>",
+        "<movie><actress>A   One, B、C</actress>"
+        "<cast>B; C，D\nE</cast>"
+        "<performer>A One</performer></movie>",
         encoding="utf-8",
     )
 
     result = extract_actresses_from_nfo(nfo)
 
-    assert result.actresses == ("A", "B", "C", "D")
+    assert result.actresses == ("A One", "B", "C", "D", "E")
 
 
 def test_parse_error_is_reported(tmp_path):

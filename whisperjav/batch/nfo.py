@@ -42,9 +42,10 @@ def extract_actresses_from_nfo(nfo_path: Path) -> NfoActressResult:
     for element in root.iter():
         name = _local_name(element.tag)
         if name == "actor":
-            child_name = _first_child_text(element, "name")
-            if child_name:
-                values.extend(_split_names(child_name))
+            name_child = _first_child(element, "name")
+            if name_child is not None:
+                if name_child.text:
+                    values.extend(_split_names(name_child.text))
             elif element.text:
                 values.extend(_split_names(element.text))
         elif name in {"actress", "cast", "performer"} and element.text:
@@ -56,10 +57,10 @@ def _local_name(tag: str) -> str:
     return tag.rsplit("}", 1)[-1].lower()
 
 
-def _first_child_text(element: ET.Element, child_name: str) -> str | None:
+def _first_child(element: ET.Element, child_name: str) -> ET.Element | None:
     for child in list(element):
-        if _local_name(child.tag) == child_name and child.text:
-            return child.text
+        if _local_name(child.tag) == child_name:
+            return child
     return None
 
 
