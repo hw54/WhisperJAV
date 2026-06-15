@@ -2207,3 +2207,22 @@ Rejected or deferred:
 
 - Claude's concern that the initial serial scheduler slice is dead code is noted, but the plan keeps it as an explicit TDD red/green stepping stone before the overlap test forces the final worker implementation.
 - ANSI stripping from captured subprocess tails is deferred; the plan preserves diagnostic bytes as emitted because the current spec requires visible failure context, not normalized log formatting.
+
+## Final Code Review Notes
+
+2026-06-16 final Claude review used Claude Code with Task subagents over `864e5fc..c8f665b`.
+
+Accepted and fixed:
+
+- Claude reported an Important issue in `whisperjav/batch/runners.py`: `process.wait(timeout=KILL_TIMEOUT_SECONDS)` after `process.kill()` could raise `TimeoutExpired`, overriding `KeyboardInterrupt` cleanup and disrupting partial report flow.
+- Fixed in `3b19433` by preserving the original interruption, issuing an explicit stderr warning if the killed process still does not exit, and adding `test_subprocess_runner_preserves_interrupt_when_killed_process_does_not_exit`.
+
+Final re-review:
+
+- Claude re-reviewed `c8f665b..3b19433` and returned `APPROVED` with no remaining Critical or Important issues.
+
+Minor findings left intentionally unchanged:
+
+- Report serialization redacts `command_redacted` defensively even though subprocess runner output is already redacted.
+- `api_key_source` remains focused on the batch wrapper's explicit key injection path.
+- A theoretical semaphore submit failure and an unreachable `force_translate` branch were left alone because they do not affect the requested behavior and were not Critical or Important.
