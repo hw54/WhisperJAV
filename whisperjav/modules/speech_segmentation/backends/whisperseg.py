@@ -16,6 +16,7 @@ file at repo root for full attribution.
 Installation:
     pip install whisperjav[whisperseg]              # CPU
     pip install whisperjav[whisperseg-gpu]          # CUDA via onnxruntime-gpu
+    pip install whisperjav[whisperseg-rocm]         # ROCm via onnxruntime-rocm
 
 Reference:
     Gu et al., "WhisperSeg: Positive Transfer of the Whisper Speech
@@ -52,6 +53,23 @@ _DEFAULT_METADATA: Dict[str, Any] = {
     "frame_duration_ms": 20,
     "total_duration_ms": 30000,
 }
+
+
+def _select_ort_providers(
+    available_providers: List[str],
+    force_cpu: bool,
+) -> Tuple[List[str], str]:
+    """Select ONNX Runtime execution providers for WhisperSeg."""
+    if force_cpu:
+        return ["CPUExecutionProvider"], "CPU"
+
+    if "CUDAExecutionProvider" in available_providers:
+        return ["CUDAExecutionProvider", "CPUExecutionProvider"], "GPU (CUDA)"
+
+    if "ROCMExecutionProvider" in available_providers:
+        return ["ROCMExecutionProvider", "CPUExecutionProvider"], "GPU (ROCm)"
+
+    return ["CPUExecutionProvider"], "CPU"
 
 
 class WhisperSegSpeechSegmenter:
@@ -109,7 +127,7 @@ class WhisperSegSpeechSegmenter:
             chunk_threshold_s: Gap threshold for post-VAD segment grouping (seconds).
             max_group_duration_s: Maximum duration for a segment group (seconds).
                 Default 29.0 (Whisper context limit).
-            force_cpu: If True, bypass CUDAExecutionProvider even when available.
+            force_cpu: If True, bypass GPU execution providers even when available.
             num_threads: CPU threads for onnxruntime. 1 = auto
                 (cpu_count // 2 on CPU, passed as-is on GPU).
             model_path: Optional explicit path to a pre-downloaded ONNX file.
@@ -263,7 +281,8 @@ class WhisperSegSpeechSegmenter:
                 raise ImportError(
                     "WhisperSeg requires onnxruntime. "
                     "Install with: pip install whisperjav[whisperseg] "
-                    "(or whisperjav[whisperseg-gpu] for CUDA)"
+                    "(or whisperjav[whisperseg-gpu] for CUDA, "
+                    "whisperjav[whisperseg-rocm] for ROCm)"
                 ) from e
 
             try:
@@ -290,20 +309,12 @@ class WhisperSegSpeechSegmenter:
             # Build session options
             opts = ort.SessionOptions()
 
-            # Execution providers — CUDA first if available & allowed
+            # Execution providers — CUDA/ROCm first if available & allowed
             available_providers = ort.get_available_providers()
-            use_gpu = (
-                not self.force_cpu
-                and "CUDAExecutionProvider" in available_providers
+            providers, self._actual_device = _select_ort_providers(
+                available_providers, self.force_cpu
             )
-            if use_gpu:
-                providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
-                self._actual_device = "GPU (CUDA)"
-                opts.inter_op_num_threads = self.num_threads
-                opts.intra_op_num_threads = self.num_threads
-            else:
-                providers = ["CPUExecutionProvider"]
-                self._actual_device = "CPU"
+            if self._actual_device == "CPU":
                 if self.num_threads == 1:
                     optimal = max(1, multiprocessing.cpu_count() // 2)
                     opts.inter_op_num_threads = optimal
@@ -315,6 +326,9 @@ class WhisperSegSpeechSegmenter:
                 else:
                     opts.inter_op_num_threads = self.num_threads
                     opts.intra_op_num_threads = self.num_threads
+            else:
+                opts.inter_op_num_threads = self.num_threads
+                opts.intra_op_num_threads = self.num_threads
 
             # Create session
             try:

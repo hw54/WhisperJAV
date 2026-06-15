@@ -233,7 +233,7 @@ huggingface = [
 # WhisperSeg ONNX speech segmenter (v1.8.12+)
 # Install with: pip install whisperjav[whisperseg]
 # Backend: TransWithAI/Whisper-Vad-EncDec-ASMR-onnx (MIT, 119 MB on first run)
-# Note: CPU-only. For CUDA, use whisperjav[whisperseg-gpu] instead.
+# Note: CPU-only. For CUDA/ROCm, use whisperjav[whisperseg-gpu] or whisperjav[whisperseg-rocm] instead.
 whisperseg = [
     "onnxruntime>=1.16.0",
     "whisperjav[huggingface]",  # transformers (WhisperFeatureExtractor) + huggingface-hub
@@ -245,6 +245,14 @@ whisperseg = [
 whisperseg-gpu = [
     "whisperjav[whisperseg]",
     "onnxruntime-gpu>=1.16.0",
+]
+
+# WhisperSeg ROCm variant — for AMD GPUs with ROCm-enabled ONNX Runtime
+# Install with: pip install whisperjav[whisperseg-rocm]
+# Do NOT install alongside whisperseg or whisperseg-gpu; choose one ONNX Runtime wheel.
+whisperseg-rocm = [
+    "whisperjav[huggingface]",
+    "onnxruntime-rocm>=1.22.2",
 ]
 
 # Qwen3-ASR support (v1.8.3+)

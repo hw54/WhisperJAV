@@ -6,6 +6,7 @@
 # Lineage: WhisperSeg research (Gu et al., 2023).
 # Requires: pip install whisperjav[whisperseg]        (CPU)
 #           pip install whisperjav[whisperseg-gpu]    (CUDA via onnxruntime-gpu)
+#           pip install whisperjav[whisperseg-rocm]   (ROCm via onnxruntime-rocm)
 # Model: TransWithAI/Whisper-Vad-EncDec-ASMR-onnx (MIT, HuggingFace Hub)
 # =============================================================================
 

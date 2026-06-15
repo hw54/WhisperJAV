@@ -62,7 +62,11 @@ _BACKEND_DEPENDENCIES: Dict[str, Dict[str, Any]] = {
     "whisperseg": {
         # onnxruntime is the real gate; transformers/huggingface_hub are usually present
         "packages": ["onnxruntime"],
-        "install_hint": "pip install whisperjav[whisperseg] (or whisperjav[whisperseg-gpu] for CUDA)",
+        "install_hint": (
+            "pip install whisperjav[whisperseg] "
+            "(or whisperjav[whisperseg-gpu] for CUDA, "
+            "whisperjav[whisperseg-rocm] for ROCm)"
+        ),
         "always_available": False,
     },
     "whisper": {
