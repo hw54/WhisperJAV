@@ -232,3 +232,45 @@ def test_subprocess_runner_terminates_process_when_wait_is_interrupted(monkeypat
         SubprocessRunner(stream=False).run(["cmd"])
 
     assert created_processes[0].terminated
+
+
+def test_subprocess_runner_preserves_interrupt_when_killed_process_does_not_exit(monkeypatch, capsys):
+    created_processes = []
+
+    class StubbornProcess:
+        stdout = io.StringIO("")
+        stderr = io.StringIO("")
+        pid = 12345
+
+        def __init__(self):
+            self.terminated = False
+            self.killed = False
+
+        def wait(self, timeout=None):
+            if timeout is None:
+                raise KeyboardInterrupt
+            raise runners.subprocess.TimeoutExpired(cmd=["cmd"], timeout=timeout)
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            self.terminated = True
+
+        def kill(self):
+            self.killed = True
+
+    def fake_popen(*args, **kwargs):
+        process = StubbornProcess()
+        created_processes.append(process)
+        return process
+
+    monkeypatch.setattr(runners.subprocess, "Popen", fake_popen)
+
+    with pytest.raises(KeyboardInterrupt):
+        SubprocessRunner(stream=False).run(["cmd"])
+
+    assert created_processes[0].terminated
+    assert created_processes[0].killed
+    captured = capsys.readouterr()
+    assert "subprocess did not exit after kill" in captured.err

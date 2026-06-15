@@ -134,4 +134,10 @@ def _terminate_process(process: subprocess.Popen[str]) -> None:
     if process.poll() is not None:
         return
     process.kill()
-    process.wait(timeout=KILL_TIMEOUT_SECONDS)
+    try:
+        process.wait(timeout=KILL_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        print(
+            f"WARNING: subprocess did not exit after kill: pid={getattr(process, 'pid', 'unknown')}",
+            file=sys.stderr,
+        )
