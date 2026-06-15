@@ -114,7 +114,7 @@ When NFO or manual metadata produces actress context, pass it as:
 --actress "Name1, Name2"
 ```
 
-The expected translation output path is computed with the same naming rule as `whisperjav.translate.cli.generate_output_path(input, "chinese")`: if the Japanese SRT stem ends in a recognized source language suffix (`japanese`, `english`, `ja`, `en`, `jp`), remove that suffix, then append `.chinese.srt`. For the recommended ASR output this yields:
+The expected translation output path follows the same naming rule as `whisperjav.translate.cli.generate_output_path(input, "chinese")`: split the SRT stem on `.`, and if the final dot-separated segment is a recognized language code (`japanese`, `english`, `ja`, `en`, `jp`), remove that final segment before appending `.chinese.srt`. For the recommended ASR output this yields:
 
 ```text
 ABC-123.ja.pass1.srt -> ABC-123.ja.pass1.chinese.srt
