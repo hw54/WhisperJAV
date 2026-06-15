@@ -31,10 +31,7 @@ def discover_media_files(root: Path, *, include_audio: bool = False) -> list[Pat
 
 
 def is_valid_srt(path: Path) -> bool:
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace").strip()
-    except OSError:
-        return False
+    text = path.read_text(encoding="utf-8", errors="replace").strip()
     if not text:
         return False
     blocks = [block for block in text.split("\n\n") if " --> " in block]
@@ -117,10 +114,11 @@ def _find_external_subtitle(video_path: Path) -> Path | None:
 
 
 def _find_japanese_srt(video_path: Path) -> Path | None:
-    for suffix in WHISPERJAV_SOURCE_SUFFIXES:
-        candidate = video_path.with_name(f"{video_path.stem}{suffix}")
-        if candidate.exists() and is_valid_srt(candidate):
-            return candidate
+    for subtitle in sorted(video_path.parent.iterdir()):
+        if not subtitle.is_file() or subtitle.suffix.lower() != ".srt":
+            continue
+        if _is_whisperjav_source(video_path.stem, subtitle) and is_valid_srt(subtitle):
+            return subtitle
     return None
 
 
@@ -129,7 +127,9 @@ def _find_chinese_srt(video_path: Path, japanese_srt: Path | None) -> Path | Non
         expected = expected_translation_path(japanese_srt)
         if expected.exists():
             return expected
-    for subtitle in sorted(video_path.parent.glob(f"{video_path.stem}*.srt")):
+    for subtitle in sorted(video_path.parent.iterdir()):
+        if not subtitle.is_file() or subtitle.suffix.lower() != ".srt":
+            continue
         if _is_whisperjav_translation(video_path.stem, subtitle):
             return subtitle
     return None
@@ -140,16 +140,23 @@ def _matches_video_basename(video_stem: str, subtitle: Path) -> bool:
 
 
 def _is_whisperjav_subtitle(video_stem: str, subtitle: Path) -> bool:
+    return _is_whisperjav_source(video_stem, subtitle) or _is_whisperjav_translation(
+        video_stem,
+        subtitle,
+    )
+
+
+def _is_whisperjav_source(video_stem: str, subtitle: Path) -> bool:
     if not subtitle.name.startswith(f"{video_stem}."):
         return False
-    source = any(subtitle.name.endswith(suffix) for suffix in WHISPERJAV_SOURCE_SUFFIXES)
-    return source or _is_whisperjav_translation(video_stem, subtitle)
+    subtitle_name = subtitle.name.lower()
+    return any(subtitle_name.endswith(suffix) for suffix in WHISPERJAV_SOURCE_SUFFIXES)
 
 
 def _is_whisperjav_translation(video_stem: str, subtitle: Path) -> bool:
     if not subtitle.name.startswith(f"{video_stem}."):
         return False
-    rest = subtitle.name[len(video_stem) :]
+    rest = subtitle.name[len(video_stem) :].lower()
     return any(
         rest.startswith(marker) and rest.endswith(suffix)
         for marker in WHISPERJAV_STEM_MARKERS
