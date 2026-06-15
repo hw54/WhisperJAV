@@ -29,7 +29,7 @@ def test_batch_report_writer_writes_jsonl_and_summary_without_secrets(tmp_path):
             translation=ProcessResult(
                 seconds=2.5,
                 return_code=0,
-                command_redacted=("translate", "--model", "deepseek-v4-flash"),
+                command_redacted=("translate", "--api-key", "fake-secret", "--model", "deepseek-v4-flash"),
                 api_key_source="env",
             ),
         ),
@@ -40,7 +40,7 @@ def test_batch_report_writer_writes_jsonl_and_summary_without_secrets(tmp_path):
             translation=ProcessResult(
                 seconds=0.5,
                 return_code=1,
-                command_redacted=("translate", "--model", "deepseek-v4-flash"),
+                command_redacted=("translate", "--translate-api-key=fake-secret", "--model", "deepseek-v4-flash"),
                 api_key_source="env",
                 stderr_tail="failed",
             ),
@@ -50,13 +50,25 @@ def test_batch_report_writer_writes_jsonl_and_summary_without_secrets(tmp_path):
 
     paths = writer.write(results, started_at="2026-06-16T00:00:00Z", ended_at="2026-06-16T00:00:03Z")
 
-    assert paths.report_file == report_dir / "batch_results.jsonl"
-    assert paths.summary_file == report_dir / "batch_summary.json"
-    records = [json.loads(line) for line in paths.report_file.read_text(encoding="utf-8").splitlines()]
-    summary = json.loads(paths.summary_file.read_text(encoding="utf-8"))
+    assert paths.jsonl == report_dir / "run-20260616-000000.jsonl"
+    assert paths.summary == report_dir / "run-20260616-000000.summary.json"
+    records = [json.loads(line) for line in paths.jsonl.read_text(encoding="utf-8").splitlines()]
+    summary = json.loads(paths.summary.read_text(encoding="utf-8"))
     serialized = json.dumps({"records": records, "summary": summary})
     assert "fake-secret" not in serialized
-    assert "--api-key" not in records[0]["translation"]["command_redacted"]
+    assert records[0]["translation"]["command_redacted"] == [
+        "translate",
+        "--api-key",
+        "<redacted>",
+        "--model",
+        "deepseek-v4-flash",
+    ]
+    assert records[1]["translation"]["command_redacted"] == [
+        "translate",
+        "--translate-api-key=<redacted>",
+        "--model",
+        "deepseek-v4-flash",
+    ]
     assert records[0]["video_path"] == str(video)
     assert records[0]["nfo_path"] == str(nfo)
     assert records[0]["japanese_srt"] == str(japanese)
@@ -66,16 +78,9 @@ def test_batch_report_writer_writes_jsonl_and_summary_without_secrets(tmp_path):
     assert summary["input_root"] == str(input_root)
     assert summary["started_at"] == "2026-06-16T00:00:00Z"
     assert summary["ended_at"] == "2026-06-16T00:00:03Z"
-    assert summary["report_file"] == str(paths.report_file)
-    assert summary["counts"] == {"completed": 1, "failed_translation": 1}
-    assert summary["failed"] == [
-        {
-            "video_path": str(input_root / "BAD-999.mp4"),
-            "status": "failed_translation",
-            "reason": "translation_failed",
-            "error": "translation failed",
-        }
-    ]
+    assert summary["report_file"] == str(paths.jsonl)
+    assert summary["counts_by_status"] == {"completed": 1, "failed_translation": 1}
+    assert summary["failed"] == [str(input_root / "BAD-999.mp4")]
 
 
 def test_summarize_results_totals_seconds_and_counts_statuses(tmp_path):
@@ -100,20 +105,13 @@ def test_summarize_results_totals_seconds_and_counts_statuses(tmp_path):
         ),
     ]
 
-    summary = summarize_results(results, input_root=tmp_path, report_file=tmp_path / "batch_results.jsonl")
+    summary = summarize_results(results)
 
-    assert summary["counts"] == {"completed": 1, "failed_asr": 1, "skip_translated": 1}
-    assert summary["total"] == 3
-    assert summary["asr_seconds"] == 4.5
-    assert summary["translation_seconds"] == 3.0
-    assert summary["failed"] == [
-        {
-            "video_path": str(tmp_path / "failed.mp4"),
-            "status": "failed_asr",
-            "reason": "asr_failed",
-            "error": "boom",
-        }
-    ]
+    assert summary["counts_by_status"] == {"completed": 1, "failed_asr": 1, "skip_translated": 1}
+    assert summary["total_videos"] == 3
+    assert summary["total_asr_seconds"] == 4.5
+    assert summary["total_translation_seconds"] == 3.0
+    assert summary["failed"] == [str(tmp_path / "failed.mp4")]
 
 
 def test_completed_process_result_redacts_command_and_keeps_bounded_tails():

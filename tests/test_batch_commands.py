@@ -102,14 +102,20 @@ def test_expected_translation_path_matches_translate_cli_rule(tmp_path):
 
 
 def test_redact_command_masks_api_key_values():
-    command = ["cmd", "--api-key", "secret", "--translate-api-key", "other", "--model", "x"]
+    command = [
+        "cmd",
+        "--api-key",
+        "secret",
+        "--translate-api-key=other",
+        "--model",
+        "x",
+    ]
 
     assert redact_command(command) == [
         "cmd",
         "--api-key",
         "<redacted>",
-        "--translate-api-key",
-        "<redacted>",
+        "--translate-api-key=<redacted>",
         "--model",
         "x",
     ]

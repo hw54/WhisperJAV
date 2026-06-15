@@ -8,14 +8,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from .commands import SECRET_FLAGS
+from .commands import redact_command
 from .models import ProcessResult, VideoResult
 
 
 @dataclass(frozen=True)
 class ReportPaths:
-    report_file: Path
-    summary_file: Path
+    jsonl: Path
+    summary: Path
 
 
 class BatchReportWriter:
@@ -32,54 +32,42 @@ class BatchReportWriter:
     ) -> ReportPaths:
         result_list = list(results)
         start_time = started_at or _utc_timestamp()
+        report_id = _report_id(start_time)
         paths = ReportPaths(
-            report_file=self.report_dir / "batch_results.jsonl",
-            summary_file=self.report_dir / "batch_summary.json",
+            jsonl=self.report_dir / f"run-{report_id}.jsonl",
+            summary=self.report_dir / f"run-{report_id}.summary.json",
         )
 
         self.report_dir.mkdir(parents=True, exist_ok=True)
-        with paths.report_file.open("w", encoding="utf-8") as report_file:
+        with paths.jsonl.open("w", encoding="utf-8") as report_file:
             for result in result_list:
                 line = json.dumps(_serialize_video_result(result), ensure_ascii=False, sort_keys=True)
                 report_file.write(f"{line}\n")
 
         end_time = ended_at or _utc_timestamp()
-        summary = summarize_results(
-            result_list,
-            input_root=self.input_root,
-            report_file=paths.report_file,
-            started_at=start_time,
-            ended_at=end_time,
-        )
-        paths.summary_file.write_text(
+        summary = summarize_results(result_list)
+        summary["input_root"] = str(self.input_root)
+        summary["started_at"] = start_time
+        summary["ended_at"] = end_time
+        summary["report_file"] = str(paths.jsonl)
+        paths.summary.write_text(
             json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
         return paths
 
 
-def summarize_results(
-    results: Iterable[VideoResult],
-    *,
-    input_root: Path,
-    report_file: Path,
-    started_at: str | None = None,
-    ended_at: str | None = None,
-) -> dict[str, Any]:
+def summarize_results(results: Iterable[VideoResult]) -> dict[str, Any]:
     result_list = list(results)
     counts = Counter(result.status for result in result_list)
     return {
-        "input_root": str(input_root),
-        "started_at": started_at,
-        "ended_at": ended_at,
-        "report_file": str(report_file),
-        "total": len(result_list),
-        "counts": dict(sorted(counts.items())),
-        "asr_seconds": sum(result.asr.seconds for result in result_list if result.asr is not None),
-        "translation_seconds": sum(
+        "total_videos": len(result_list),
+        "counts_by_status": dict(sorted(counts.items())),
+        "total_asr_seconds": sum(result.asr.seconds for result in result_list if result.asr is not None),
+        "total_translation_seconds": sum(
             result.translation.seconds for result in result_list if result.translation is not None
         ),
-        "failed": [_failed_entry(result) for result in result_list if _is_failed(result)],
+        "failed": [str(result.video_path) for result in result_list if _is_failed(result)],
     }
 
 
@@ -105,25 +93,11 @@ def _serialize_process_result(result: ProcessResult | None) -> dict[str, Any] | 
     return {
         "seconds": result.seconds,
         "return_code": result.return_code,
-        "command_redacted": _command_without_secret_flags(result.command_redacted),
+        "command_redacted": redact_command(list(result.command_redacted)),
         "api_key_source": result.api_key_source,
         "stdout_tail": result.stdout_tail,
         "stderr_tail": result.stderr_tail,
     }
-
-
-def _command_without_secret_flags(command: Iterable[str]) -> list[str]:
-    redacted: list[str] = []
-    skip_next = False
-    for part in command:
-        if skip_next:
-            skip_next = False
-            continue
-        if part in SECRET_FLAGS:
-            skip_next = True
-            continue
-        redacted.append(part)
-    return redacted
 
 
 def _path_or_none(path: Path | None) -> str | None:
@@ -134,14 +108,10 @@ def _is_failed(result: VideoResult) -> bool:
     return result.status.startswith("failed_") or result.status == "cancelled"
 
 
-def _failed_entry(result: VideoResult) -> dict[str, str | None]:
-    return {
-        "video_path": str(result.video_path),
-        "status": result.status,
-        "reason": result.reason,
-        "error": result.error,
-    }
-
-
 def _utc_timestamp() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _report_id(timestamp: str) -> str:
+    normalized = timestamp.removesuffix("Z") + "+00:00" if timestamp.endswith("Z") else timestamp
+    return datetime.fromisoformat(normalized).strftime("%Y%m%d-%H%M%S")

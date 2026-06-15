@@ -117,6 +117,10 @@ def redact_command(command: list[str]) -> list[str]:
             redacted.append("<redacted>")
             redact_next = False
             continue
+        flag, separator, _value = part.partition("=")
+        if separator and flag in SECRET_FLAGS:
+            redacted.append(f"{flag}=<redacted>")
+            continue
         redacted.append(part)
         if part in SECRET_FLAGS:
             redact_next = True
