@@ -53,10 +53,13 @@ class ClassifiedVideo:
 class ProcessResult:
     seconds: float = 0.0
     return_code: int | None = None
-    command_redacted: list[str] = field(default_factory=list)
+    command_redacted: tuple[str, ...] = field(default_factory=tuple)
     api_key_source: str | None = None
     stdout_tail: str = ""
     stderr_tail: str = ""
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "command_redacted", tuple(self.command_redacted))
 
 
 @dataclass(frozen=True)

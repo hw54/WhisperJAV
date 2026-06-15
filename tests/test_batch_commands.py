@@ -1,14 +1,16 @@
+import importlib
 import json
 import sys
 from pathlib import Path
 
+import whisperjav.batch.commands as command_builders
 from whisperjav.batch.commands import (
     build_asr_command,
     build_translation_command,
     expected_translation_path,
     redact_command,
 )
-from whisperjav.batch.models import BatchOptions
+from whisperjav.batch.models import BatchOptions, ProcessResult
 
 
 def test_asr_command_uses_recommended_anime_whisper_settings(tmp_path):
@@ -66,11 +68,21 @@ def test_translation_command_uses_standalone_translate_cli_and_context(tmp_path)
     assert command[command.index("--tone") + 1] == "pornify"
     assert "--model" in command
     assert command[command.index("--model") + 1] == "deepseek-v4-flash"
-    assert "--api-key" in command
-    assert command[command.index("--api-key") + 1] == "secret-key"
+    assert "--api-key" not in command
     assert "--actress" in command
     assert command[command.index("--actress") + 1] == "Name1, Name2"
     assert "--translate-provider" not in command
+
+
+def test_translation_env_injects_api_key_without_mutating_base_env(tmp_path):
+    options = BatchOptions(root=tmp_path, translate_api_key="secret-key")
+    base_env = {"EXISTING": "1"}
+
+    env = command_builders.build_translation_env(options, base_env=base_env)
+
+    assert env["EXISTING"] == "1"
+    assert env["DEEPSEEK_API_KEY"] == "secret-key"
+    assert base_env == {"EXISTING": "1"}
 
 
 def test_translation_command_uses_nfo_actresses_when_no_manual_override(tmp_path):
@@ -103,7 +115,22 @@ def test_redact_command_masks_api_key_values():
     ]
 
 
+def test_process_result_command_redacted_is_immutable_tuple():
+    command = ["cmd", "--model", "x"]
+
+    result = ProcessResult(command_redacted=command)
+    command.append("--debug")
+
+    assert result.command_redacted == ("cmd", "--model", "x")
+
+
 def test_pyproject_exposes_batch_entry_point():
     text = Path("pyproject.toml").read_text(encoding="utf-8")
 
     assert 'whisperjav-batch = "whisperjav.batch.cli:main"' in text
+
+
+def test_batch_cli_entry_point_module_is_importable():
+    module = importlib.import_module("whisperjav.batch.cli")
+
+    assert callable(module.main)

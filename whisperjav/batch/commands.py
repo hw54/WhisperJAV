@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 from .models import BatchOptions
@@ -80,8 +81,6 @@ def build_translation_command(
         "--model",
         "deepseek-v4-flash",
     ]
-    if options.translate_api_key:
-        command.extend(["--api-key", options.translate_api_key])
     actress_context = options.actress or ", ".join(actresses)
     if actress_context:
         command.extend(["--actress", actress_context])
@@ -90,6 +89,16 @@ def build_translation_command(
     if options.debug:
         command.append("--debug")
     return command
+
+
+def build_translation_env(
+    options: BatchOptions,
+    base_env: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    env = dict(base_env or {})
+    if options.translate_api_key:
+        env["DEEPSEEK_API_KEY"] = options.translate_api_key
+    return env
 
 
 def expected_translation_path(japanese_srt: Path) -> Path:

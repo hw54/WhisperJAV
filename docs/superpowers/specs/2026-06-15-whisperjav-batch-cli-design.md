@@ -99,11 +99,11 @@ Implementation must build this with `sys.executable`:
 [sys.executable, "-u", "-m", "whisperjav.translate.cli", ...]
 ```
 
-Do not use `whisperjav.main --translate-*` names for this subprocess. Those names belong to the main transcription CLI; the standalone translation CLI uses `--provider`, `--target`, `--tone`, `--model`, `--api-key`, and `--actress`.
+Do not use `whisperjav.main --translate-*` names for this subprocess. Those names belong to the main transcription CLI; the standalone translation CLI uses `--provider`, `--target`, `--tone`, `--model`, and `--actress`. The standalone CLI supports argv API keys, but the batch wrapper must not put secrets in subprocess argv.
 
 API key resolution:
 
-1. Batch CLI `--translate-api-key`, if provided, is passed to translation as `--api-key`.
+1. Batch CLI `--translate-api-key`, if provided, is injected into the translation subprocess environment as `DEEPSEEK_API_KEY`.
 2. Otherwise, provider-specific environment variables are resolved by the translation CLI/service.
 
 The existing translation settings file can provide provider/model/tone-style preferences to `whisperjav.translate.cli`, but it does not store API keys. Because this batch workflow has fixed recommended defaults, the wrapper passes provider/model/target/tone explicitly by default.
@@ -321,14 +321,14 @@ Each JSONL row represents one video:
     "seconds": 56.7,
     "return_code": 0,
     "api_key_source": "env",
-    "command_redacted": ["...", "--api-key", "<redacted>"]
+    "command_redacted": ["...", "--model", "deepseek-v4-flash"]
   },
   "error": null,
   "warnings": []
 }
 ```
 
-Reports must never contain raw API keys. Redact values after `--api-key` and `--translate-api-key` even when `--debug` is enabled.
+Reports must never contain raw API keys. Translation API keys are passed through `DEEPSEEK_API_KEY` in the subprocess environment, not command argv. Redact values after `--api-key` and `--translate-api-key` if either secret flag is ever present in a command record, even when `--debug` is enabled.
 
 The summary JSON includes:
 

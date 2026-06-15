@@ -28,7 +28,7 @@
 - Create `whisperjav/batch/reports.py`: JSONL and summary report writer with redacted command records.
 - Create `whisperjav/batch/runners.py`: subprocess runner and fake-runner-friendly protocol.
 - Create `whisperjav/batch/scheduler.py`: one-ASR-at-a-time scheduler with bounded translation queue and cancellation handling.
-- Create `whisperjav/batch/cli.py`: argparse entry point and terminal summary.
+- Create `whisperjav/batch/cli.py`: Task 1 placeholder entry point; Task 6 replaces it with argparse integration and terminal summary.
 - Modify `pyproject.toml`: add `whisperjav-batch = "whisperjav.batch.cli:main"`.
 - Create `tests/test_batch_commands.py`.
 - Create `tests/test_batch_discovery.py`.
@@ -52,6 +52,7 @@
 - Create: `whisperjav/batch/__init__.py`
 - Create: `whisperjav/batch/models.py`
 - Create: `whisperjav/batch/commands.py`
+- Create: `whisperjav/batch/cli.py`
 - Modify: `pyproject.toml`
 - Test: `tests/test_batch_commands.py`
 
@@ -60,17 +61,19 @@
 Create `tests/test_batch_commands.py`:
 
 ```python
+import importlib
 import json
 import sys
 from pathlib import Path
 
+import whisperjav.batch.commands as command_builders
 from whisperjav.batch.commands import (
     build_asr_command,
     build_translation_command,
     expected_translation_path,
     redact_command,
 )
-from whisperjav.batch.models import BatchOptions
+from whisperjav.batch.models import BatchOptions, ProcessResult
 
 
 def test_asr_command_uses_recommended_anime_whisper_settings(tmp_path):
@@ -128,11 +131,21 @@ def test_translation_command_uses_standalone_translate_cli_and_context(tmp_path)
     assert command[command.index("--tone") + 1] == "pornify"
     assert "--model" in command
     assert command[command.index("--model") + 1] == "deepseek-v4-flash"
-    assert "--api-key" in command
-    assert command[command.index("--api-key") + 1] == "secret-key"
+    assert "--api-key" not in command
     assert "--actress" in command
     assert command[command.index("--actress") + 1] == "Name1, Name2"
     assert "--translate-provider" not in command
+
+
+def test_translation_env_injects_api_key_without_mutating_base_env(tmp_path):
+    options = BatchOptions(root=tmp_path, translate_api_key="secret-key")
+    base_env = {"EXISTING": "1"}
+
+    env = command_builders.build_translation_env(options, base_env=base_env)
+
+    assert env["EXISTING"] == "1"
+    assert env["DEEPSEEK_API_KEY"] == "secret-key"
+    assert base_env == {"EXISTING": "1"}
 
 
 def test_translation_command_uses_nfo_actresses_when_no_manual_override(tmp_path):
@@ -165,10 +178,25 @@ def test_redact_command_masks_api_key_values():
     ]
 
 
+def test_process_result_command_redacted_is_immutable_tuple():
+    command = ["cmd", "--model", "x"]
+
+    result = ProcessResult(command_redacted=command)
+    command.append("--debug")
+
+    assert result.command_redacted == ("cmd", "--model", "x")
+
+
 def test_pyproject_exposes_batch_entry_point():
     text = Path("pyproject.toml").read_text(encoding="utf-8")
 
     assert 'whisperjav-batch = "whisperjav.batch.cli:main"' in text
+
+
+def test_batch_cli_entry_point_module_is_importable():
+    module = importlib.import_module("whisperjav.batch.cli")
+
+    assert callable(module.main)
 ```
 
 - [ ] **Step 2: Run tests to verify RED**
@@ -247,10 +275,13 @@ class ClassifiedVideo:
 class ProcessResult:
     seconds: float = 0.0
     return_code: int | None = None
-    command_redacted: list[str] = field(default_factory=list)
+    command_redacted: tuple[str, ...] = field(default_factory=tuple)
     api_key_source: str | None = None
     stdout_tail: str = ""
     stderr_tail: str = ""
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "command_redacted", tuple(self.command_redacted))
 
 
 @dataclass(frozen=True)
@@ -275,6 +306,7 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 from .models import BatchOptions
@@ -353,8 +385,6 @@ def build_translation_command(
         "--model",
         "deepseek-v4-flash",
     ]
-    if options.translate_api_key:
-        command.extend(["--api-key", options.translate_api_key])
     actress_context = options.actress or ", ".join(actresses)
     if actress_context:
         command.extend(["--actress", actress_context])
@@ -363,6 +393,16 @@ def build_translation_command(
     if options.debug:
         command.append("--debug")
     return command
+
+
+def build_translation_env(
+    options: BatchOptions,
+    base_env: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    env = dict(base_env or {})
+    if options.translate_api_key:
+        env["DEEPSEEK_API_KEY"] = options.translate_api_key
+    return env
 
 
 def expected_translation_path(japanese_srt: Path) -> Path:
@@ -387,6 +427,16 @@ def redact_command(command: list[str]) -> list[str]:
     return redacted
 ```
 
+Create `whisperjav/batch/cli.py`:
+
+```python
+from __future__ import annotations
+
+
+def main(argv: list[str] | None = None) -> int:
+    raise SystemExit("whisperjav-batch CLI is not implemented yet")
+```
+
 Modify `pyproject.toml` under `[project.scripts]`:
 
 ```toml
@@ -408,7 +458,7 @@ Expected: PASS.
 Run:
 
 ```bash
-git add pyproject.toml whisperjav/batch/__init__.py whisperjav/batch/models.py whisperjav/batch/commands.py tests/test_batch_commands.py
+git add pyproject.toml whisperjav/batch/__init__.py whisperjav/batch/models.py whisperjav/batch/commands.py whisperjav/batch/cli.py tests/test_batch_commands.py
 git commit -m "feat: add batch command builders"
 ```
 
@@ -1106,7 +1156,7 @@ def test_completed_process_result_keeps_tail_and_redacted_command():
     )
 
     assert result.return_code == 7
-    assert result.command_redacted == ["cmd", "--api-key", "<redacted>"]
+    assert result.command_redacted == ("cmd", "--api-key", "<redacted>")
     assert result.stdout_tail == "line1\nline2"
     assert result.stderr_tail == "err1\nerr2"
 
@@ -1879,7 +1929,7 @@ git commit -m "feat: schedule batch transcription and translation"
 ### Task 6: CLI Integration
 
 **Files:**
-- Create: `whisperjav/batch/cli.py`
+- Modify: `whisperjav/batch/cli.py`
 - Modify: `whisperjav/batch/discovery.py`
 - Test: `tests/test_batch_cli.py`
 
@@ -1973,11 +2023,11 @@ Run:
 timeout 60s pytest tests/test_batch_cli.py -q
 ```
 
-Expected: FAIL because `whisperjav.batch.cli` does not exist.
+Expected: FAIL because the Task 1 placeholder `whisperjav.batch.cli` does not yet implement `parse_args` or the batch CLI workflow.
 
 - [ ] **Step 3: Implement CLI**
 
-Create `whisperjav/batch/cli.py`:
+Modify `whisperjav/batch/cli.py`:
 
 ```python
 from __future__ import annotations
