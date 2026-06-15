@@ -78,6 +78,11 @@ class SubprocessRunner:
             return_code = process.wait()
             stdout_thread.join()
             stderr_thread.join()
+        except BaseException:
+            _terminate_process(process)
+            stdout_thread.join()
+            stderr_thread.join()
+            raise
         finally:
             with self._lock:
                 self._active_processes.discard(process)
@@ -95,25 +100,7 @@ class SubprocessRunner:
             processes = tuple(self._active_processes)
 
         for process in processes:
-            if process.poll() is None:
-                process.terminate()
-
-        deadline = time.monotonic() + TERMINATE_TIMEOUT_SECONDS
-        for process in processes:
-            if process.poll() is not None:
-                continue
-            try:
-                process.wait(timeout=max(0.0, deadline - time.monotonic()))
-            except subprocess.TimeoutExpired:
-                pass
-
-        for process in processes:
-            if process.poll() is None:
-                process.kill()
-
-        for process in processes:
-            if process.poll() is None:
-                process.wait(timeout=KILL_TIMEOUT_SECONDS)
+            _terminate_process(process)
 
 
 def _read_stream(
@@ -134,3 +121,17 @@ def _read_stream(
 def _tail_text(lines: Iterable[str]) -> str:
     tail = deque((line.rstrip("\n") for line in lines), maxlen=TAIL_LINES)
     return "\n".join(tail)
+
+
+def _terminate_process(process: subprocess.Popen[str]) -> None:
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=TERMINATE_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        pass
+    if process.poll() is not None:
+        return
+    process.kill()
+    process.wait(timeout=KILL_TIMEOUT_SECONDS)

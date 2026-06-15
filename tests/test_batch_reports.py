@@ -1,9 +1,13 @@
+import io
 import json
 import sys
 import threading
 import time
 from pathlib import Path
 
+import pytest
+
+from whisperjav.batch import runners
 from whisperjav.batch.models import ProcessResult, VideoResult
 from whisperjav.batch.reports import BatchReportWriter, summarize_results
 from whisperjav.batch.runners import SubprocessRunner, completed_process_result
@@ -186,3 +190,45 @@ def test_subprocess_runner_terminate_all_stops_active_process(tmp_path):
     assert not thread.is_alive()
     assert result_holder
     assert result_holder[0].return_code != 0
+
+
+def test_subprocess_runner_terminates_process_when_wait_is_interrupted(monkeypatch):
+    created_processes = []
+
+    class InterruptingProcess:
+        stdout = io.StringIO("")
+        stderr = io.StringIO("")
+
+        def __init__(self):
+            self.terminated = False
+            self.killed = False
+
+        def wait(self, timeout=None):
+            if timeout is None:
+                raise KeyboardInterrupt
+            return -15 if self.terminated else -9
+
+        def poll(self):
+            if self.terminated:
+                return -15
+            if self.killed:
+                return -9
+            return None
+
+        def terminate(self):
+            self.terminated = True
+
+        def kill(self):
+            self.killed = True
+
+    def fake_popen(*args, **kwargs):
+        process = InterruptingProcess()
+        created_processes.append(process)
+        return process
+
+    monkeypatch.setattr(runners.subprocess, "Popen", fake_popen)
+
+    with pytest.raises(KeyboardInterrupt):
+        SubprocessRunner(stream=False).run(["cmd"])
+
+    assert created_processes[0].terminated
