@@ -149,8 +149,8 @@ def _is_whisperjav_subtitle(video_stem: str, subtitle: Path) -> bool:
 def _is_whisperjav_source(video_stem: str, subtitle: Path) -> bool:
     if not subtitle.name.startswith(f"{video_stem}."):
         return False
-    subtitle_name = subtitle.name.lower()
-    return any(subtitle_name.endswith(suffix) for suffix in WHISPERJAV_SOURCE_SUFFIXES)
+    rest = subtitle.name[len(video_stem) :].lower()
+    return rest in WHISPERJAV_SOURCE_SUFFIXES
 
 
 def _is_whisperjav_translation(video_stem: str, subtitle: Path) -> bool:

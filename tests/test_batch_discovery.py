@@ -103,6 +103,18 @@ def test_whisperjav_japanese_suffix_detection_is_case_insensitive(tmp_path):
     assert item.external_subtitle is None
 
 
+def test_extra_prefixed_japanese_suffix_is_external_subtitle(tmp_path):
+    video = tmp_path / "ABC-123.mp4"
+    subtitle = tmp_path / "ABC-123.extra.ja.pass1.srt"
+    video.write_text("video")
+    write_valid_srt(subtitle, "はい")
+
+    item = classify_video(video, BatchOptions(root=tmp_path))
+
+    assert item.status == "skip_external_subtitle"
+    assert item.external_subtitle == subtitle
+
+
 def test_valid_chinese_translation_is_skipped(tmp_path):
     video = tmp_path / "ABC-123.mp4"
     japanese = tmp_path / "ABC-123.ja.pass1.srt"
