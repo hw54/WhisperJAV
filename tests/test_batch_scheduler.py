@@ -63,6 +63,8 @@ class FakeRunner:
         command: Sequence[str],
         *,
         env: Mapping[str, str] | None = None,
+        heartbeat=None,
+        heartbeat_interval_seconds: float | None = None,
     ) -> ProcessResult:
         command_list = list(command)
         self.commands.append(command_list)
@@ -93,6 +95,29 @@ class FakeRunner:
         write_valid_srt(srt.with_name(f"{srt.stem}.chinese.srt"), "中文")
         write_valid_subtrans(srt.with_suffix(".subtrans"))
         return ProcessResult(return_code=0, command_redacted=command, seconds=3.0)
+
+
+class RecordingProgress:
+    def __init__(self) -> None:
+        self.totals = None
+        self.events: list[tuple[str, str, str]] = []
+        self.messages: list[str] = []
+        self.timeline: list[tuple[str, str]] = []
+        self.closed = False
+
+    def start(self, totals) -> None:
+        self.totals = totals
+
+    def advance(self, event) -> None:
+        self.events.append((event.phase, event.outcome, event.video_path.name))
+        self.timeline.append(("event", f"{event.phase}:{event.outcome}:{event.video_path.name}"))
+
+    def message(self, text: str) -> None:
+        self.messages.append(text)
+        self.timeline.append(("message", text))
+
+    def close(self) -> None:
+        self.closed = True
 
 
 def test_existing_japanese_srt_translation_completes(tmp_path: Path) -> None:
@@ -151,6 +176,180 @@ def test_transcribe_then_translate_runs_asr_before_translation(tmp_path: Path) -
         "whisperjav.main",
         "whisperjav.translate.cli",
     ]
+
+
+def test_scheduler_reports_file_asr_and_translation_progress(tmp_path: Path) -> None:
+    skipped_video = tmp_path / "SKIP-001.mp4"
+    existing_video = tmp_path / "EXIST-001.mp4"
+    asr_video = tmp_path / "ASR-001.mp4"
+    existing_japanese = tmp_path / "EXIST-001.ja.pass1.srt"
+    existing_chinese = tmp_path / "SKIP-001.chinese.srt"
+    skipped_video.write_text("video", encoding="utf-8")
+    existing_video.write_text("video", encoding="utf-8")
+    asr_video.write_text("video", encoding="utf-8")
+    write_valid_srt(existing_japanese)
+    write_valid_srt(existing_chinese, "中文")
+    items = [
+        ClassifiedVideo(
+            video_path=skipped_video,
+            status="skip_translated",
+            chinese_srt=existing_chinese,
+        ),
+        ClassifiedVideo(
+            video_path=existing_video,
+            status="translate_existing_japanese",
+            japanese_srt=existing_japanese,
+        ),
+        ClassifiedVideo(video_path=asr_video, status="transcribe_then_translate"),
+    ]
+    runner = FakeRunner(fail_asr=True)
+    progress = RecordingProgress()
+
+    results = BatchScheduler(BatchOptions(root=tmp_path), runner=runner, progress=progress).run(items)
+
+    assert [result.status for result in results] == [
+        "skip_translated",
+        "completed_translation_only",
+        "failed_asr",
+    ]
+    assert progress.totals.files == 3
+    assert progress.totals.asr == 1
+    assert progress.totals.translation == 2
+    assert progress.closed
+    assert progress.events.count(("files", "skip_translated", "SKIP-001.mp4")) == 1
+    assert progress.events.count(("files", "completed_translation_only", "EXIST-001.mp4")) == 1
+    assert progress.events.count(("files", "failed_asr", "ASR-001.mp4")) == 1
+    assert progress.events.count(("translation", "translated", "EXIST-001.mp4")) == 1
+    assert progress.events.count(("asr", "failed", "ASR-001.mp4")) == 1
+    assert progress.events.count(("translation", "blocked_asr", "ASR-001.mp4")) == 1
+
+
+def test_scheduler_reports_asr_and_translation_activity_messages(tmp_path: Path) -> None:
+    video = tmp_path / "ABC-123.mp4"
+    video.write_text("video", encoding="utf-8")
+    item = ClassifiedVideo(video_path=video, status="transcribe_then_translate")
+    runner = FakeRunner()
+    progress = RecordingProgress()
+
+    results = BatchScheduler(BatchOptions(root=tmp_path), runner=runner, progress=progress).run([item])
+
+    assert results[0].status == "completed"
+    assert progress.messages == [
+        "正在处理ASR：ABC-123.mp4",
+        "ASR完成：ABC-123.mp4",
+        "正在处理翻译：ABC-123.mp4",
+        "翻译完成：ABC-123.mp4",
+    ]
+
+
+def test_scheduler_advances_asr_progress_before_translation_starts(tmp_path: Path) -> None:
+    video = tmp_path / "ABC-123.mp4"
+    video.write_text("video", encoding="utf-8")
+    item = ClassifiedVideo(video_path=video, status="transcribe_then_translate")
+    progress = RecordingProgress()
+
+    results = BatchScheduler(BatchOptions(root=tmp_path), runner=FakeRunner(), progress=progress).run([item])
+
+    assert results[0].status == "completed"
+    assert ("asr", "ok", "ABC-123.mp4") in progress.events
+    assert progress.timeline.index(("event", "asr:ok:ABC-123.mp4")) < progress.timeline.index(
+        ("message", "正在处理翻译：ABC-123.mp4")
+    )
+
+
+class HeartbeatRunner(FakeRunner):
+    def run(
+        self,
+        command: Sequence[str],
+        *,
+        env: Mapping[str, str] | None = None,
+        heartbeat=None,
+        heartbeat_interval_seconds: float | None = None,
+    ) -> ProcessResult:
+        if heartbeat is not None:
+            if "whisperjav.main" in command:
+                heartbeat(65.0)
+            else:
+                heartbeat(125.0)
+        return super().run(
+            command,
+            env=env,
+            heartbeat=heartbeat,
+            heartbeat_interval_seconds=heartbeat_interval_seconds,
+        )
+
+
+def test_scheduler_reports_long_running_subprocess_heartbeats(tmp_path: Path) -> None:
+    video = tmp_path / "ABC-123.mp4"
+    video.write_text("video", encoding="utf-8")
+    item = ClassifiedVideo(video_path=video, status="transcribe_then_translate")
+    progress = RecordingProgress()
+
+    results = BatchScheduler(BatchOptions(root=tmp_path), runner=HeartbeatRunner(), progress=progress).run([item])
+
+    assert results[0].status == "completed"
+    assert "ASR仍在处理：ABC-123.mp4（已耗时 1m05s）" in progress.messages
+    assert "翻译仍在处理：ABC-123.mp4（已耗时 2m05s）" in progress.messages
+
+
+class TranslationCompletesDuringNextAsrRunner(FakeRunner):
+    def __init__(self) -> None:
+        super().__init__()
+        self.translation_started = threading.Event()
+        self.allow_translation_finish = threading.Event()
+
+    def run(
+        self,
+        command: Sequence[str],
+        *,
+        env: Mapping[str, str] | None = None,
+        heartbeat=None,
+        heartbeat_interval_seconds: float | None = None,
+    ) -> ProcessResult:
+        command_list = list(command)
+        self.commands.append(command_list)
+        self.envs.append(env)
+        if "whisperjav.main" not in command_list:
+            return self._run_translation(command_list)
+
+        video = Path(command_list[4])
+        if video.name == "SECOND.mp4":
+            assert self.translation_started.wait(timeout=1.0)
+            self.allow_translation_finish.set()
+            time.sleep(0.05)
+            if heartbeat is not None:
+                heartbeat(65.0)
+        return self._run_asr(command_list)
+
+    def _run_translation(self, command: list[str]) -> ProcessResult:
+        srt = Path(command[command.index("-i") + 1])
+        if srt.name == "FIRST.ja.pass1.srt":
+            self.translation_started.set()
+            assert self.allow_translation_finish.wait(timeout=1.0)
+        return super()._run_translation(command)
+
+
+def test_scheduler_advances_translation_progress_while_next_asr_is_running(tmp_path: Path) -> None:
+    first = tmp_path / "FIRST.mp4"
+    second = tmp_path / "SECOND.mp4"
+    first.write_text("video", encoding="utf-8")
+    second.write_text("video", encoding="utf-8")
+    items = [
+        ClassifiedVideo(video_path=first, status="transcribe_then_translate"),
+        ClassifiedVideo(video_path=second, status="transcribe_then_translate"),
+    ]
+    progress = RecordingProgress()
+
+    results = BatchScheduler(
+        BatchOptions(root=tmp_path),
+        runner=TranslationCompletesDuringNextAsrRunner(),
+        progress=progress,
+    ).run(items)
+
+    assert [result.status for result in results] == ["completed", "completed"]
+    assert progress.timeline.index(("event", "translation:translated:FIRST.mp4")) < progress.timeline.index(
+        ("message", "ASR仍在处理：SECOND.mp4（已耗时 1m05s）")
+    )
 
 
 class MissingSubtransRunner(FakeRunner):
@@ -548,6 +747,8 @@ class InterruptingRunner(FakeRunner):
         command: Sequence[str],
         *,
         env: Mapping[str, str] | None = None,
+        heartbeat=None,
+        heartbeat_interval_seconds: float | None = None,
     ) -> ProcessResult:
         raise KeyboardInterrupt
 

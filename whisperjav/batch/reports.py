@@ -29,6 +29,7 @@ class BatchReportWriter:
         *,
         started_at: str | None = None,
         ended_at: str | None = None,
+        wall_seconds: float | None = None,
     ) -> ReportPaths:
         result_list = list(results)
         start_time = started_at or _utc_timestamp()
@@ -45,7 +46,7 @@ class BatchReportWriter:
                 report_file.write(f"{line}\n")
 
         end_time = ended_at or _utc_timestamp()
-        summary = summarize_results(result_list)
+        summary = summarize_results(result_list, wall_seconds=wall_seconds)
         summary["input_root"] = str(self.input_root)
         summary["started_at"] = start_time
         summary["ended_at"] = end_time
@@ -57,18 +58,81 @@ class BatchReportWriter:
         return paths
 
 
-def summarize_results(results: Iterable[VideoResult]) -> dict[str, Any]:
+def summarize_results(
+    results: Iterable[VideoResult],
+    *,
+    wall_seconds: float | None = None,
+) -> dict[str, Any]:
     result_list = list(results)
     counts = Counter(result.status for result in result_list)
+    total_asr_seconds = sum(
+        result.asr.seconds for result in result_list if result.asr is not None
+    )
+    total_translation_seconds = sum(
+        result.translation.seconds for result in result_list if result.translation is not None
+    )
     return {
         "total_videos": len(result_list),
         "counts_by_status": dict(sorted(counts.items())),
-        "total_asr_seconds": sum(result.asr.seconds for result in result_list if result.asr is not None),
-        "total_translation_seconds": sum(
-            result.translation.seconds for result in result_list if result.translation is not None
+        "total_asr_seconds": total_asr_seconds,
+        "total_translation_seconds": total_translation_seconds,
+        "performance": _performance_summary(
+            result_list,
+            total_asr_seconds=total_asr_seconds,
+            total_translation_seconds=total_translation_seconds,
+            wall_seconds=wall_seconds,
         ),
         "failed": [str(result.video_path) for result in result_list if _is_failed(result)],
     }
+
+
+def _performance_summary(
+    results: list[VideoResult],
+    *,
+    total_asr_seconds: float,
+    total_translation_seconds: float,
+    wall_seconds: float | None,
+) -> dict[str, Any]:
+    asr_count = sum(1 for result in results if result.asr is not None)
+    translation_count = sum(1 for result in results if result.translation is not None)
+    processed = [result for result in results if result.asr is not None or result.translation is not None]
+    duration_included = [
+        result
+        for result in processed
+        if result.duration_seconds is not None and result.duration_seconds > 0
+    ]
+    total_video_duration = sum(result.duration_seconds or 0.0 for result in duration_included)
+    total_processing_seconds = sum(
+        (result.asr.seconds if result.asr is not None else 0.0)
+        + (result.translation.seconds if result.translation is not None else 0.0)
+        for result in processed
+    )
+    processing_to_duration_ratio = _safe_divide(wall_seconds, total_video_duration)
+
+    return {
+        "asr_count": asr_count,
+        "translation_count": translation_count,
+        "processed_video_count": len(processed),
+        "duration_included_count": len(duration_included),
+        "unknown_duration_count": sum(
+            1 for result in processed if result.duration_seconds is None
+        ),
+        "duration_excluded_count": len(results) - len(duration_included),
+        "total_video_duration_seconds": total_video_duration,
+        "total_wall_seconds": wall_seconds,
+        "average_asr_seconds": _safe_divide(total_asr_seconds, asr_count),
+        "average_translation_seconds": _safe_divide(total_translation_seconds, translation_count),
+        "average_total_processing_seconds": _safe_divide(total_processing_seconds, len(processed)),
+        "processing_to_duration_ratio": processing_to_duration_ratio,
+        "wall_to_duration_ratio": processing_to_duration_ratio,
+        "throughput_ratio": _safe_divide(total_video_duration, wall_seconds),
+    }
+
+
+def _safe_divide(numerator: float | None, denominator: float | None) -> float | None:
+    if numerator is None or denominator is None or denominator <= 0:
+        return None
+    return numerator / denominator
 
 
 def _serialize_video_result(result: VideoResult) -> dict[str, Any]:

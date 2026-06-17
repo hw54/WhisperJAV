@@ -68,6 +68,7 @@ def test_contextual_instructions_are_bundled_not_gist_backed() -> None:
     bundled = load_bundled_default("contextual")
     assert bundled is not None
     assert "matches the explicitness of the original" in bundled
+    assert "Do not include translator notes" in bundled
     assert get_instruction_content("contextual") == bundled
 
 
@@ -100,4 +101,3 @@ def test_interactive_configure_can_select_contextual_tone(monkeypatch, tmp_path)
     configure.interactive_configure()
 
     assert saved_settings["tone"] == "contextual"
-

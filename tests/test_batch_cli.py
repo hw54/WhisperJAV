@@ -81,6 +81,12 @@ def test_parse_args_accepts_high_translation_worker_count(tmp_path):
     assert args.translate_workers == 20
 
 
+def test_parse_args_accepts_no_progress(tmp_path):
+    args = cli.parse_args([str(tmp_path), "--no-progress"])
+
+    assert args.no_progress is True
+
+
 def test_parse_args_rejects_invalid_translation_queue_size(tmp_path):
     with pytest.raises(SystemExit):
         cli.parse_args([str(tmp_path), "--translation-queue-size", "0"])
@@ -187,8 +193,9 @@ def test_multi_root_uses_one_scheduler_run_to_keep_pipeline_filled(tmp_path, mon
     scheduler_runs = []
 
     class RecordingScheduler:
-        def __init__(self, options):
+        def __init__(self, options, *, progress=None):
             self.options = options
+            self.progress = progress
 
         def run(self, classified):
             items = list(classified)
@@ -205,6 +212,63 @@ def test_multi_root_uses_one_scheduler_run_to_keep_pipeline_filled(tmp_path, mon
     second_summary = read_single_summary(second / ".whisperjav_batch")
     assert first_summary["total_videos"] == 1
     assert second_summary["total_videos"] == 1
+
+
+def test_cli_uses_progress_reporter_by_default(tmp_path, monkeypatch):
+    video = tmp_path / "ABC-123.mp4"
+    video.write_text("video", encoding="utf-8")
+    report_dir = tmp_path / "reports"
+    sentinel_progress = object()
+    progress_values = []
+
+    class RecordingScheduler:
+        def __init__(self, options, *, progress=None):
+            self.options = options
+            self.progress = progress
+            progress_values.append(progress)
+
+        def run(self, classified):
+            return [
+                VideoResult(video_path=item.video_path, status=item.status)
+                for item in classified
+            ]
+
+    monkeypatch.setattr(cli, "BatchScheduler", RecordingScheduler)
+    monkeypatch.setattr(cli, "TqdmBatchProgress", lambda: sentinel_progress, raising=False)
+
+    code = cli.main([str(tmp_path), "--report-dir", str(report_dir)])
+
+    assert code == 0
+    assert progress_values == [sentinel_progress]
+
+
+def test_cli_disables_progress_when_streaming_subprocess_output(tmp_path, monkeypatch, capsys):
+    video = tmp_path / "ABC-123.mp4"
+    video.write_text("video", encoding="utf-8")
+    report_dir = tmp_path / "reports"
+    progress_values = []
+
+    class RecordingScheduler:
+        def __init__(self, options, *, progress=None):
+            self.options = options
+            self.progress = progress
+            progress_values.append(progress)
+
+        def run(self, classified):
+            return [
+                VideoResult(video_path=item.video_path, status=item.status)
+                for item in classified
+            ]
+
+    monkeypatch.setattr(cli, "BatchScheduler", RecordingScheduler)
+    monkeypatch.setattr(cli, "TqdmBatchProgress", lambda: object(), raising=False)
+
+    code = cli.main([str(tmp_path), "--stream", "--report-dir", str(report_dir)])
+
+    captured = capsys.readouterr()
+    assert code == 0
+    assert progress_values == [None]
+    assert "Batch progress disabled because --stream is enabled." in captured.err
 
 
 def test_multi_root_explicit_report_dir_uses_root_subdirectories(tmp_path):

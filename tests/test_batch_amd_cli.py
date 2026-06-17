@@ -54,7 +54,6 @@ def test_amd_batch_main_passes_one_directory_to_batch_cli(tmp_path, monkeypatch)
     assert calls == [
         [
             str(tmp_path),
-            "--stream",
             "--asr-retries",
             "1",
             "--translation-retries",
@@ -91,7 +90,6 @@ def test_amd_batch_main_passes_multiple_directories_to_batch_cli(tmp_path, monke
             str(first),
             str(second),
             str(third),
-            "--stream",
             "--asr-retries",
             "1",
             "--translation-retries",
@@ -119,7 +117,6 @@ def test_amd_batch_main_passes_custom_translate_workers_to_batch_cli(tmp_path, m
     assert calls == [
         [
             str(tmp_path),
-            "--stream",
             "--asr-retries",
             "1",
             "--translation-retries",
@@ -183,7 +180,6 @@ def test_amd_batch_main_passes_custom_translation_queue_size_to_batch_cli(
     assert calls == [
         [
             str(tmp_path),
-            "--stream",
             "--asr-retries",
             "1",
             "--translation-retries",
@@ -211,7 +207,6 @@ def test_amd_batch_main_passes_custom_duration_limit_to_batch_cli(tmp_path, monk
     assert calls == [
         [
             str(tmp_path),
-            "--stream",
             "--asr-retries",
             "1",
             "--translation-retries",
@@ -224,6 +219,21 @@ def test_amd_batch_main_passes_custom_duration_limit_to_batch_cli(tmp_path, monk
             "180",
         ]
     ]
+
+
+def test_amd_batch_main_passes_stream_to_batch_cli_when_requested(tmp_path, monkeypatch) -> None:
+    calls: list[list[str]] = []
+    monkeypatch.setattr(amd_cli, "reexec_with_render_group_if_needed", lambda _argv, *, env: None)
+    monkeypatch.setattr(
+        amd_cli.batch_cli,
+        "main",
+        lambda argv: calls.append(list(argv)) or 0,
+    )
+
+    code = amd_cli.main([str(tmp_path), "--stream"])
+
+    assert code == 0
+    assert "--stream" in calls[0]
 
 
 def test_reexecs_through_render_group_when_kfd_is_inaccessible(tmp_path, monkeypatch) -> None:

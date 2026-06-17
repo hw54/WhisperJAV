@@ -3,12 +3,15 @@ from __future__ import annotations
 import argparse
 import hashlib
 import re
+import sys
+import time
 from dataclasses import replace
 from pathlib import Path
 
 from .discovery import classify_video, discover_media_files
 from .models import BatchOptions, ClassifiedVideo, VideoResult
 from .nfo import extract_metadata_from_nfo, find_nfo_for_video
+from .progress import BatchProgressReporter, TqdmBatchProgress
 from .reports import BatchReportWriter, ReportPaths, summarize_results
 from .scheduler import BatchScheduler
 
@@ -28,6 +31,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--force-translate", action="store_true")
     parser.add_argument("--stream", action="store_true")
+    parser.add_argument("--no-progress", action="store_true")
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--accept-cpu-mode", action="store_true")
     parser.add_argument("--no-nfo", action="store_true")
@@ -63,17 +67,27 @@ def _run_roots(args: argparse.Namespace, roots: list[Path] | None = None) -> lis
             root_items.append((root, _attach_nfo_context(classify_video(path, options), options)))
 
     scheduler_options = _build_options(args, selected_roots[0], multiple_roots=len(selected_roots) > 1)
-    results = BatchScheduler(scheduler_options).run(item for _, item in root_items)
+    progress = _create_progress_reporter(args)
+    started = time.perf_counter()
+    results = BatchScheduler(scheduler_options, progress=progress).run(item for _, item in root_items)
+    wall_seconds = time.perf_counter() - started
     results_by_root = _split_results_by_root(selected_roots, root_items, results)
     summaries = []
 
     for root in selected_roots:
         root_results = results_by_root[root]
         report_dir = _report_dir_for_root(args, root, multiple_roots=len(selected_roots) > 1)
-        paths = BatchReportWriter(report_dir=report_dir, input_root=root).write(root_results)
-        summary = summarize_results(root_results)
+        root_wall_seconds = wall_seconds if len(selected_roots) == 1 else None
+        paths = BatchReportWriter(report_dir=report_dir, input_root=root).write(
+            root_results,
+            wall_seconds=root_wall_seconds,
+        )
+        summary = summarize_results(root_results, wall_seconds=root_wall_seconds)
         _print_summary(summary, paths)
         summaries.append(summary)
+
+    if len(selected_roots) > 1:
+        _print_aggregate_summary(summarize_results(results, wall_seconds=wall_seconds))
 
     return summaries
 
@@ -93,6 +107,7 @@ def _build_options(args: argparse.Namespace, root: Path, *, multiple_roots: bool
         translation_retries=args.translation_retries,
         max_video_minutes=args.max_video_minutes,
         stream=args.stream,
+        no_progress=args.no_progress,
         debug=args.debug,
         accept_cpu_mode=args.accept_cpu_mode,
         no_nfo=args.no_nfo,
@@ -199,10 +214,62 @@ def _manual_actresses(value: str | None) -> tuple[str, ...]:
     return tuple(part.strip() for part in value.split(",") if part.strip())
 
 
+def _create_progress_reporter(args: argparse.Namespace) -> BatchProgressReporter | None:
+    if args.no_progress or args.dry_run:
+        return None
+    if args.stream:
+        print("Batch progress disabled because --stream is enabled.", file=sys.stderr)
+        return None
+    return TqdmBatchProgress()
+
+
 def _print_summary(summary: dict, paths: ReportPaths) -> None:
     print("WHISPERJAV BATCH SUMMARY")
     print(f"total_videos: {summary['total_videos']}")
     for status, count in summary["counts_by_status"].items():
         print(f"{status}: {count}")
+    _print_performance(summary)
     print(f"Report: {paths.jsonl}")
     print(f"Summary: {paths.summary}")
+
+
+def _print_aggregate_summary(summary: dict) -> None:
+    print("WHISPERJAV BATCH AGGREGATE")
+    print(f"total_videos: {summary['total_videos']}")
+    for status, count in summary["counts_by_status"].items():
+        print(f"{status}: {count}")
+    _print_performance(summary)
+
+
+def _print_performance(summary: dict) -> None:
+    performance = summary.get("performance") or {}
+    print(f"total_asr_seconds: {_format_seconds(summary.get('total_asr_seconds'))}")
+    print(f"total_translation_seconds: {_format_seconds(summary.get('total_translation_seconds'))}")
+    print(f"average_asr_seconds: {_format_seconds(performance.get('average_asr_seconds'))}")
+    print(f"average_translation_seconds: {_format_seconds(performance.get('average_translation_seconds'))}")
+    print(
+        "average_total_processing_seconds: "
+        f"{_format_seconds(performance.get('average_total_processing_seconds'))}"
+    )
+    print(f"total_video_duration_seconds: {_format_seconds(performance.get('total_video_duration_seconds'))}")
+    print(f"total_wall_seconds: {_format_seconds(performance.get('total_wall_seconds'))}")
+    print(
+        "processing_to_duration_ratio: "
+        f"{_format_ratio(performance.get('processing_to_duration_ratio'))}"
+    )
+    print(f"wall_to_duration_ratio: {_format_ratio(performance.get('wall_to_duration_ratio'))}")
+    print(f"throughput_ratio: {_format_ratio(performance.get('throughput_ratio'))}")
+    print(f"unknown_duration_count: {performance.get('unknown_duration_count', 0)}")
+    print(f"duration_excluded_count: {performance.get('duration_excluded_count', 0)}")
+
+
+def _format_seconds(value: float | None) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value:.2f}"
+
+
+def _format_ratio(value: float | None) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value:.3f}"

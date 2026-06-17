@@ -34,6 +34,7 @@ class BatchOptions:
     translation_retries: int = 2
     max_video_minutes: float = 230
     stream: bool = False
+    no_progress: bool = False
     debug: bool = False
     accept_cpu_mode: bool = False
     no_nfo: bool = False

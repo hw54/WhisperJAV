@@ -6,7 +6,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import Iterable, Mapping, Sequence
-from typing import TextIO
+from typing import Callable, TextIO
 
 from .commands import redact_command
 from .models import ProcessResult
@@ -14,6 +14,7 @@ from .models import ProcessResult
 TAIL_LINES = 80
 TERMINATE_TIMEOUT_SECONDS = 2.0
 KILL_TIMEOUT_SECONDS = 2.0
+DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 60.0
 
 
 def completed_process_result(
@@ -46,6 +47,8 @@ class SubprocessRunner:
         command: Sequence[str],
         *,
         env: Mapping[str, str] | None = None,
+        heartbeat: Callable[[float], None] | None = None,
+        heartbeat_interval_seconds: float = DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
     ) -> ProcessResult:
         command_list = list(command)
         stdout_tail: deque[str] = deque(maxlen=TAIL_LINES)
@@ -75,7 +78,12 @@ class SubprocessRunner:
         stdout_thread.start()
         stderr_thread.start()
         try:
-            return_code = process.wait()
+            return_code = _wait_with_heartbeat(
+                process,
+                started=started,
+                heartbeat=heartbeat,
+                heartbeat_interval_seconds=heartbeat_interval_seconds,
+            )
             stdout_thread.join()
             stderr_thread.join()
         except BaseException:
@@ -116,6 +124,23 @@ def _read_stream(
             mirror.write(line)
             mirror.flush()
     stream.close()
+
+
+def _wait_with_heartbeat(
+    process: subprocess.Popen[str],
+    *,
+    started: float,
+    heartbeat: Callable[[float], None] | None,
+    heartbeat_interval_seconds: float,
+) -> int | None:
+    if heartbeat is None or heartbeat_interval_seconds <= 0:
+        return process.wait()
+
+    while True:
+        try:
+            return process.wait(timeout=heartbeat_interval_seconds)
+        except subprocess.TimeoutExpired:
+            heartbeat(time.perf_counter() - started)
 
 
 def _tail_text(lines: Iterable[str]) -> str:

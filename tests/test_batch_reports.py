@@ -121,6 +121,52 @@ def test_summarize_results_totals_seconds_and_counts_statuses(tmp_path):
     assert summary["failed"] == [str(tmp_path / "failed.mp4")]
 
 
+def test_summarize_results_includes_performance_metrics(tmp_path):
+    results = [
+        VideoResult(
+            video_path=tmp_path / "completed.mp4",
+            status="completed",
+            asr=ProcessResult(seconds=4.0),
+            translation=ProcessResult(seconds=6.0),
+            duration_seconds=100.0,
+        ),
+        VideoResult(
+            video_path=tmp_path / "translated.mp4",
+            status="completed_translation_only",
+            translation=ProcessResult(seconds=5.0),
+            duration_seconds=50.0,
+        ),
+        VideoResult(
+            video_path=tmp_path / "unknown-duration.mp4",
+            status="failed_translation",
+            translation=ProcessResult(seconds=3.0, return_code=1),
+        ),
+        VideoResult(
+            video_path=tmp_path / "skipped.mp4",
+            status="skip_translated",
+            duration_seconds=999.0,
+        ),
+    ]
+
+    summary = summarize_results(results, wall_seconds=30.0)
+
+    performance = summary["performance"]
+    assert performance["asr_count"] == 1
+    assert performance["translation_count"] == 3
+    assert performance["processed_video_count"] == 3
+    assert performance["duration_included_count"] == 2
+    assert performance["unknown_duration_count"] == 1
+    assert performance["duration_excluded_count"] == 2
+    assert performance["total_video_duration_seconds"] == 150.0
+    assert performance["total_wall_seconds"] == 30.0
+    assert performance["average_asr_seconds"] == 4.0
+    assert performance["average_translation_seconds"] == pytest.approx(14.0 / 3.0)
+    assert performance["average_total_processing_seconds"] == pytest.approx(18.0 / 3.0)
+    assert performance["processing_to_duration_ratio"] == 0.2
+    assert performance["wall_to_duration_ratio"] == 0.2
+    assert performance["throughput_ratio"] == 5.0
+
+
 def test_completed_process_result_redacts_command_and_keeps_bounded_tails():
     stdout_lines = [f"stdout {index}" for index in range(85)]
     stderr_lines = [f"stderr {index}" for index in range(85)]
@@ -165,6 +211,25 @@ def test_subprocess_runner_streams_output_and_preserves_tails(capsys):
     assert "out:from-env" in result.stdout_tail
     assert "err:from-env" in result.stderr_tail
     assert result.command_redacted == tuple(command)
+
+
+def test_subprocess_runner_emits_heartbeat_while_process_runs():
+    runner = SubprocessRunner(stream=False)
+    heartbeats = []
+
+    result = runner.run(
+        [
+            sys.executable,
+            "-c",
+            "import time; time.sleep(0.16)",
+        ],
+        heartbeat=heartbeats.append,
+        heartbeat_interval_seconds=0.05,
+    )
+
+    assert result.return_code == 0
+    assert heartbeats
+    assert all(elapsed > 0 for elapsed in heartbeats)
 
 
 def test_subprocess_runner_terminate_all_stops_active_process(tmp_path):

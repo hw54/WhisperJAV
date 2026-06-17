@@ -11,6 +11,28 @@ DEEPSEEK_THINKING_OPTION = "deepseek_thinking"
 DEEPSEEK_THINKING_VALUES = {"enabled", "disabled", "default"}
 MARKDOWN_CODE_FENCE_LINE_RE = re.compile(r"^\s*```[\w-]*\s*$")
 TRAILING_MARKDOWN_CODE_FENCE_RE = re.compile(r"\s+```[\w-]*\s*$")
+TRANSLATOR_NOTE_KEYWORDS = (
+    "注[:：]",
+    "听写错误",
+    "转录错误",
+    "疑似",
+    "根据上下文",
+    "结合上下文",
+    "翻译修正",
+    "可能指",
+    "可能为",
+    "应为",
+    "想说",
+    "没说完",
+)
+TRANSLATOR_NOTE_KEYWORD_PATTERN = "|".join(TRANSLATOR_NOTE_KEYWORDS)
+TRANSLATOR_NOTE_LINE_RE = re.compile(
+    rf"(?m)^[ \t]*[（(][^）)\r\n]*(?:{TRANSLATOR_NOTE_KEYWORD_PATTERN})"
+    rf"[^）)\r\n]*[）)][ \t]*(?:\r?\n)?"
+)
+TRANSLATOR_NOTE_INLINE_RE = re.compile(
+    rf"[ \t]*[（(][^）)]*(?:{TRANSLATOR_NOTE_KEYWORD_PATTERN})[^）)]*[）)]"
+)
 
 
 def cap_batch_size_for_context(max_batch_size: int, n_ctx: int) -> int:
@@ -195,12 +217,27 @@ def _remove_markdown_code_fences_from_srt_text(text: str) -> tuple[str, int]:
     return "".join(cleaned_lines), removed
 
 
+def _remove_translator_notes_from_srt_text(text: str) -> tuple[str, int]:
+    without_note_lines, line_count = TRANSLATOR_NOTE_LINE_RE.subn("", text)
+    cleaned, inline_count = TRANSLATOR_NOTE_INLINE_RE.subn("", without_note_lines)
+    return cleaned, line_count + inline_count
+
+
 def _clean_saved_subtitle_code_fences(path: Path) -> int:
     text = path.read_text(encoding="utf-8-sig")
     cleaned, removed = _remove_markdown_code_fences_from_srt_text(text)
     if removed:
         path.write_text(cleaned, encoding="utf-8")
     return removed
+
+
+def _clean_saved_subtitle_output(path: Path) -> tuple[int, int]:
+    text = path.read_text(encoding="utf-8-sig")
+    cleaned, removed_fences = _remove_markdown_code_fences_from_srt_text(text)
+    cleaned, removed_notes = _remove_translator_notes_from_srt_text(cleaned)
+    if removed_fences or removed_notes:
+        path.write_text(cleaned, encoding="utf-8")
+    return removed_fences, removed_notes
 
 
 def translate_subtitle(
@@ -812,9 +849,12 @@ def translate_subtitle(
             print(f"[TRANSLATE]   WARNING: SaveTranslation did not produce output at: {output_path}",
                   file=sys.stderr)
         else:
-            _removed_fences = _clean_saved_subtitle_code_fences(output_path)
+            _removed_fences, _removed_notes = _clean_saved_subtitle_output(output_path)
             if _removed_fences:
                 print(f"[TRANSLATE]   Removed {_removed_fences} Markdown code fence marker(s) from output",
+                      file=sys.stderr)
+            if _removed_notes:
+                print(f"[TRANSLATE]   Removed {_removed_notes} translator note(s) from output",
                       file=sys.stderr)
 
         # =====================================================================

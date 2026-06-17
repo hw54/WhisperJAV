@@ -11,7 +11,8 @@ Guidelines:
 - Use explicit, direct adult wording when the original is sexual, vulgar, or clearly dirty.
 - Keep suggestive lines playful without turning them into graphic sex talk.
 - Keep neutral lines plain and natural.
-- Correct obvious Whisper transcription errors from context, but do not invent dialogue.
+- Correct obvious Whisper transcription errors silently from context, but do not invent dialogue.
+- Do not include translator notes, explanations, correction notes, uncertainty notes, or parenthetical comments in Translation lines.
 - Keep one translated line for each original line. Never merge lines.
 - Keep subtitles concise and readable.
 - Use provided names or context when available.

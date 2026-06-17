@@ -14,7 +14,6 @@ AMD_GFX_OVERRIDE = "11.0.0"
 MIGRAPHX_MODEL_CACHE_ENV = "ORT_MIGRAPHX_MODEL_CACHE_PATH"
 MIGRAPHX_MODEL_CACHE_SUBDIR = Path("whisperjav") / "migraphx"
 AMD_BATCH_ARGS = (
-    "--stream",
     "--asr-retries",
     "1",
     "--translation-retries",
@@ -32,6 +31,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("roots", nargs="+", type=Path)
     parser.add_argument("--max-video-minutes", type=_nonnegative_minutes)
+    parser.add_argument("--stream", action="store_true")
     parser.add_argument(
         "--translate-workers",
         type=_translate_workers,
@@ -76,6 +76,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     ]
     if args.max_video_minutes is not None:
         batch_args.extend(["--max-video-minutes", args.max_video_minutes])
+    if args.stream:
+        batch_args.append("--stream")
     return batch_cli.main(batch_args)
 
 
