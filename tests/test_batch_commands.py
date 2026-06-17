@@ -65,7 +65,7 @@ def test_translation_command_uses_standalone_translate_cli_and_context(tmp_path)
     assert "--target" in command
     assert command[command.index("--target") + 1] == "chinese"
     assert "--tone" in command
-    assert command[command.index("--tone") + 1] == "pornify"
+    assert command[command.index("--tone") + 1] == "contextual"
     assert "--model" in command
     assert command[command.index("--model") + 1] == "deepseek-v4-flash"
     assert "--api-key" not in command
@@ -94,6 +94,22 @@ def test_translation_command_uses_nfo_actresses_when_no_manual_override(tmp_path
 
     assert command[command.index("--actress") + 1] == "Name1, Name2"
     assert "--api-key" not in command
+
+
+def test_translation_command_includes_movie_title_and_plot(tmp_path):
+    srt = tmp_path / "ABC-123.ja.pass1.srt"
+    srt.write_text("1\n00:00:00,000 --> 00:00:01,000\nはい\n")
+    options = BatchOptions(root=tmp_path)
+
+    command = build_translation_command(
+        srt,
+        options,
+        movie_title="ABC-123-Title",
+        movie_plot="Short plot",
+    )
+
+    assert command[command.index("--movie-title") + 1] == "ABC-123-Title"
+    assert command[command.index("--movie-plot") + 1] == "Short plot"
 
 
 def test_expected_translation_path_matches_translate_cli_rule(tmp_path):
@@ -134,6 +150,7 @@ def test_pyproject_exposes_batch_entry_point():
     text = Path("pyproject.toml").read_text(encoding="utf-8")
 
     assert 'whisperjav-batch = "whisperjav.batch.cli:main"' in text
+    assert 'whisperjav-amd-batch = "whisperjav.batch.amd_cli:main"' in text
 
 
 def test_batch_cli_entry_point_module_is_importable():

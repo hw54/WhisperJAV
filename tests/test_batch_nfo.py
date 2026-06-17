@@ -1,4 +1,9 @@
-from whisperjav.batch.nfo import extract_actresses_from_nfo, find_nfo_for_video
+from whisperjav.batch.nfo import (
+    MAX_MOVIE_PLOT_CONTEXT_CHARS,
+    extract_actresses_from_nfo,
+    extract_metadata_from_nfo,
+    find_nfo_for_video,
+)
 
 
 def test_basename_nfo_wins_over_directory_nfo(tmp_path):
@@ -82,6 +87,55 @@ def test_cast_fields_split_and_deduplicate_in_order(tmp_path):
     result = extract_actresses_from_nfo(nfo)
 
     assert result.actresses == ("A One", "B", "C", "D", "E")
+
+
+def test_metadata_reads_title_and_plot_from_realistic_nfo(tmp_path):
+    nfo = tmp_path / "ABC-123.nfo"
+    nfo.write_text(
+        "<movie>"
+        "<title>ABC-123-制服美少女の誘惑</title>"
+        "<originaltitle>Ignored Original</originaltitle>"
+        "<plot>ABC-123#第一行\n第二行\t  第三行</plot>"
+        "<outline>Ignored Outline</outline>"
+        "<actor><name>Actor Name</name></actor>"
+        "</movie>",
+        encoding="utf-8",
+    )
+
+    result = extract_metadata_from_nfo(nfo)
+
+    assert result.actresses == ("Actor Name",)
+    assert result.movie_title == "ABC-123-制服美少女の誘惑"
+    assert result.movie_plot == "ABC-123#第一行 第二行 第三行"
+    assert result.error is None
+
+
+def test_metadata_falls_back_to_originaltitle_and_outline(tmp_path):
+    nfo = tmp_path / "ABC-123.nfo"
+    nfo.write_text(
+        "<movie>"
+        "<title>   </title>"
+        "<originaltitle>Original Title</originaltitle>"
+        "<plot></plot>"
+        "<outline>Outline text</outline>"
+        "</movie>",
+        encoding="utf-8",
+    )
+
+    result = extract_metadata_from_nfo(nfo)
+
+    assert result.movie_title == "Original Title"
+    assert result.movie_plot == "Outline text"
+
+
+def test_metadata_truncates_long_plot(tmp_path):
+    nfo = tmp_path / "ABC-123.nfo"
+    long_plot = "あ" * (MAX_MOVIE_PLOT_CONTEXT_CHARS + 20)
+    nfo.write_text(f"<movie><plot>{long_plot}</plot></movie>", encoding="utf-8")
+
+    result = extract_metadata_from_nfo(nfo)
+
+    assert result.movie_plot == "あ" * MAX_MOVIE_PLOT_CONTEXT_CHARS
 
 
 def test_parse_error_is_reported(tmp_path):

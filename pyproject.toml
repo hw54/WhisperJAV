@@ -346,6 +346,7 @@ whisperjav-translate = "whisperjav.translate.cli:main"
 whisperjav-upgrade = "whisperjav.upgrade:main"
 whisperjav-bench = "whisperjav.bench.cli:main"
 whisperjav-batch = "whisperjav.batch.cli:main"
+whisperjav-amd-batch = "whisperjav.batch.amd_cli:main"
 
 # -----------------------------------------------------------------------------
 # Project URLs

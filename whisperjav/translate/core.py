@@ -3,8 +3,14 @@ Core translation logic - PySubtrans wrapper.
 """
 
 import os
+import re
 import sys
 from pathlib import Path
+
+DEEPSEEK_THINKING_OPTION = "deepseek_thinking"
+DEEPSEEK_THINKING_VALUES = {"enabled", "disabled", "default"}
+MARKDOWN_CODE_FENCE_LINE_RE = re.compile(r"^\s*```[\w-]*\s*$")
+TRAILING_MARKDOWN_CODE_FENCE_RE = re.compile(r"\s+```[\w-]*\s*$")
 
 
 def cap_batch_size_for_context(max_batch_size: int, n_ctx: int) -> int:
@@ -136,6 +142,67 @@ def _api_base_to_custom_server(api_base: str) -> tuple:
     return server_address, endpoint
 
 
+def _resolve_deepseek_thinking(
+    provider_config: dict,
+    model: str,
+    provider_options: dict,
+) -> str | None:
+    requested = provider_options.pop(DEEPSEEK_THINKING_OPTION, None)
+    if requested is not None:
+        mode = str(requested).lower()
+        if mode not in DEEPSEEK_THINKING_VALUES:
+            raise ValueError(
+                f"{DEEPSEEK_THINKING_OPTION} must be one of: "
+                f"{', '.join(sorted(DEEPSEEK_THINKING_VALUES))}"
+            )
+        return None if mode == "default" else mode
+
+    if provider_config.get("pysubtrans_name") == "DeepSeek" and model.lower() == "deepseek-v4-flash":
+        return "disabled"
+    return None
+
+
+def _patch_deepseek_thinking_request(translator: object, mode: str, *, debug: bool = False) -> None:
+    client = getattr(translator, "client", None)
+    if client is None or not hasattr(client, "_generate_request_body"):
+        raise RuntimeError("DeepSeek thinking mode was requested, but the translation client cannot be patched")
+
+    original_generate = client._generate_request_body
+
+    def _generate_request_body_with_thinking(request, temperature):
+        body = original_generate(request, temperature)
+        body["thinking"] = {"type": mode}
+        return body
+
+    client._generate_request_body = _generate_request_body_with_thinking
+    if debug:
+        print(f"[TRANSLATE]   DeepSeek thinking request patch: {mode}", file=sys.stderr)
+
+
+def _remove_markdown_code_fences_from_srt_text(text: str) -> tuple[str, int]:
+    removed = 0
+    cleaned_lines = []
+    for line in text.splitlines(keepends=True):
+        body = line.rstrip("\r\n")
+        newline = line[len(body):]
+        if MARKDOWN_CODE_FENCE_LINE_RE.match(body):
+            removed += 1
+            continue
+        cleaned = TRAILING_MARKDOWN_CODE_FENCE_RE.sub("", body)
+        if cleaned != body:
+            removed += 1
+        cleaned_lines.append(f"{cleaned}{newline}")
+    return "".join(cleaned_lines), removed
+
+
+def _clean_saved_subtitle_code_fences(path: Path) -> int:
+    text = path.read_text(encoding="utf-8-sig")
+    cleaned, removed = _remove_markdown_code_fences_from_srt_text(text)
+    if removed:
+        path.write_text(cleaned, encoding="utf-8")
+    return removed
+
+
 def translate_subtitle(
     input_path: str,
     output_path: Path,
@@ -194,13 +261,19 @@ def translate_subtitle(
             prompt += "\n" + extra_context
             print(f"[TRANSLATE]   Extra context: {extra_context[:200]}", file=sys.stderr)
 
+        provider_options = dict(provider_options or {})
+
         # Qwen3-family thinking model flag: consumed later by the response
         # parsing patch (after provider init). Remove from provider_options
         # so it doesn't get passed to PySubtrans as an unknown option.
-        _is_thinking_model = provider_options.pop('_thinking_model', False) if provider_options else False
+        _is_thinking_model = provider_options.pop('_thinking_model', False)
         if _is_thinking_model:
             print(f"[TRANSLATE]   Thinking model: YES (will patch response parsing)",
                   file=sys.stderr)
+
+        _deepseek_thinking_mode = _resolve_deepseek_thinking(provider_config, model, provider_options)
+        if _deepseek_thinking_mode:
+            print(f"[TRANSLATE]   DeepSeek thinking: {_deepseek_thinking_mode}", file=sys.stderr)
 
         # Build provider options
         opt_kwargs = {
@@ -428,6 +501,12 @@ def translate_subtitle(
         # Initialize translator and translate
         print(f"[TRANSLATE] Initializing translator...", file=sys.stderr)
         translator = init_translator(options, translation_provider=provider)
+        if _deepseek_thinking_mode:
+            _patch_deepseek_thinking_request(
+                translator,
+                _deepseek_thinking_mode,
+                debug=debug,
+            )
 
         # =====================================================================
         # Qwen3 thinking model workaround: patch response parsing
@@ -670,15 +749,22 @@ def translate_subtitle(
             print(f"[TRANSLATE]   All subtitles translated: {'YES' if _all_translated else 'NO'}",
                   file=sys.stderr)
 
-            # Override success based on ground truth — if TranslateSubtitles()
-            # didn't raise but nothing was actually translated, it's a failure.
-            if _translation_success and not _any_translated and _batch_stats['total'] > 0:
+            # Override success based on ground truth. PySubtrans may catch
+            # per-batch parse failures internally and still let the overall
+            # call return. A partial translation is not a successful run.
+            if _translation_success and not _all_translated:
                 _translation_success = False
-                print(f"[TRANSLATE] *** ALL {_batch_stats['total']} BATCHES FAILED — "
-                      f"no subtitles were translated ***", file=sys.stderr)
-                print(f"[TRANSLATE]   Common causes: model returned empty content (thinking mode),",
-                      file=sys.stderr)
-                print(f"[TRANSLATE]   output format not parseable, or server errors.", file=sys.stderr)
+                if _any_translated:
+                    print(f"[TRANSLATE] *** PARTIAL TRANSLATION — some subtitles remain untranslated ***",
+                          file=sys.stderr)
+                    print(f"[TRANSLATE]   Treating this run as failed so batch callers can retry.",
+                          file=sys.stderr)
+                else:
+                    print(f"[TRANSLATE] *** ALL {_batch_stats['total']} BATCHES FAILED — "
+                          f"no subtitles were translated ***", file=sys.stderr)
+                    print(f"[TRANSLATE]   Common causes: model returned empty content (thinking mode),",
+                          file=sys.stderr)
+                    print(f"[TRANSLATE]   output format not parseable, or server errors.", file=sys.stderr)
 
         # Save final project state
         print(f"[TRANSLATE] Saving project state...", file=sys.stderr)
@@ -725,6 +811,11 @@ def translate_subtitle(
         if not _save_succeeded:
             print(f"[TRANSLATE]   WARNING: SaveTranslation did not produce output at: {output_path}",
                   file=sys.stderr)
+        else:
+            _removed_fences = _clean_saved_subtitle_code_fences(output_path)
+            if _removed_fences:
+                print(f"[TRANSLATE]   Removed {_removed_fences} Markdown code fence marker(s) from output",
+                      file=sys.stderr)
 
         # =====================================================================
         # Issue 2: Clean up PySubtrans' default .translated.srt artifact
@@ -766,8 +857,8 @@ def translate_subtitle(
             print(f"[TRANSLATE]   Output: {output_path}", file=sys.stderr)
         else:
             print(f"[TRANSLATE]   TRANSLATION FAILED", file=sys.stderr)
-            print(f"[TRANSLATE]   All batches returned errors — no subtitles translated.", file=sys.stderr)
-            print(f"[TRANSLATE]   Output file may be empty or contain only originals.", file=sys.stderr)
+            print(f"[TRANSLATE]   Not all subtitles were translated.", file=sys.stderr)
+            print(f"[TRANSLATE]   Output file may be partial.", file=sys.stderr)
         print(f"[TRANSLATE] " + "=" * 50, file=sys.stderr)
         print(f"", file=sys.stderr)
 

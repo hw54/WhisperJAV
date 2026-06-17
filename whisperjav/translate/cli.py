@@ -64,6 +64,7 @@ from .core import translate_subtitle, _normalize_api_base, _api_base_to_custom_s
 from .instructions import get_instruction_content, get_cache_dir
 from .settings import load_settings, create_default_settings, show_settings, get_settings_path, resolve_config
 from .configure import configure_command
+from .tones import TONE_CHOICES, get_tone_default_options
 
 import tempfile
 
@@ -90,7 +91,8 @@ def build_provider_options(args, settings_model_params: dict, effective_tone: st
     Precedence: CLI > settings > defaults (tone-aware).
     Defaults:
       - standard: temperature=0.5, top_p=0.9
-      - pornify:  temperature=1.2, top_p=0.9
+      - contextual: temperature=0.8, top_p=0.9
+      - pornify: temperature=1.2, top_p=0.9
     """
     def _to_float(val):
         try:
@@ -99,12 +101,9 @@ def build_provider_options(args, settings_model_params: dict, effective_tone: st
             return None
 
     # 1) Start from tone-aware defaults
-    if effective_tone == 'pornify':
-        temperature = 1.2
-        top_p = 0.9
-    else:
-        temperature = 0.5
-        top_p = 0.9
+    defaults = get_tone_default_options(effective_tone)
+    temperature = defaults["temperature"]
+    top_p = defaults["top_p"]
 
     # 2) Apply settings overrides (if provided and not None)
     if settings_model_params:
@@ -242,7 +241,7 @@ def main():
     )
     translation_group.add_argument(
         '--tone',
-        choices=['standard', 'pornify'],
+        choices=TONE_CHOICES,
         default=None,
         help=f"Translation tone/style (default: {settings.get('tone', 'standard')})"
     )
@@ -266,6 +265,11 @@ def main():
         '--top-p',
         type=float,
         help="Model top_p (0.0-1.0)"
+    )
+    api_group.add_argument(
+        '--deepseek-thinking',
+        choices=['disabled', 'enabled', 'default'],
+        help="DeepSeek V4 thinking mode: disabled, enabled, or default to leave API behavior unchanged"
     )
     api_group.add_argument(
         '--rate-limit',
@@ -530,6 +534,8 @@ def main():
     # Build provider options (tone-aware defaults, settings, then CLI)
     effective_tone = merged.get('tone') or 'standard'
     provider_options = build_provider_options(args, merged.get('model_params', {}), effective_tone)
+    if getattr(args, 'deepseek_thinking', None):
+        provider_options['deepseek_thinking'] = args.deepseek_thinking
 
     # Build extra context
     extra_context = build_extra_context(args)
@@ -622,17 +628,17 @@ def main():
             provider_options['num_ctx'] = ollama_n_ctx
 
         # Ollama temperature override for local LLMs.
-        # build_provider_options() always sets temperature (0.5 standard / 1.2
-        # pornify) — these are cloud-provider defaults. Local models need lower
+        # build_provider_options() always sets tone-specific cloud-provider
+        # defaults. Local models need lower
         # temperature (0.3 best-fit across 10 tested models). Override the
         # generic default with the Ollama-optimized value, but ONLY when:
         #   - User did NOT set --temperature on CLI
         #   - User did NOT set temperature in settings file
-        #   - Tone is NOT pornify (pornify's 1.2 is an intentional user choice)
+        #   - Tone is standard (adult tone defaults are intentional choices)
         _user_set_temp_cli = hasattr(args, 'temperature') and args.temperature is not None
         _user_set_temp_settings = bool(merged.get('model_params', {}).get('temperature'))
         if not _user_set_temp_cli and not _user_set_temp_settings:
-            if effective_tone != 'pornify':
+            if effective_tone == 'standard':
                 provider_options['temperature'] = readiness.get('temperature', 0.3)
 
         provider_config = dict(provider_config)
@@ -830,7 +836,7 @@ def main():
 
         except KeyboardInterrupt:
             print("\nBatch translation interrupted", file=sys.stderr)
-            sys.exit(1)
+            sys.exit(130)
         except Exception as e:
             print(f"Error translating {input_path.name}: {e}", file=sys.stderr)
             fail_count += 1

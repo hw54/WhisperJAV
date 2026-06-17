@@ -6,11 +6,11 @@ PROVIDER_CONFIGS = {
     'deepseek': {
         'pysubtrans_name': 'DeepSeek',
         # v1.8.14 (#325): DeepSeek announced new model names 2026-05-06.
-        # 'deepseek-chat' / 'deepseek-reasoner' deprecate 2026-07-24, replaced
-        # by 'deepseek-v4-flash' (non-thinking, was deepseek-chat) and
-        # 'deepseek-v4-pro' (thinking, was deepseek-reasoner).
-        # Source: https://api-docs.deepseek.com/zh-cn/
-        # Users wanting the thinking model can override via: --model deepseek-v4-pro
+        # 'deepseek-chat' / 'deepseek-reasoner' deprecate 2026-07-24.
+        # DeepSeek V4 defaults thinking to enabled; WhisperJAV injects
+        # thinking=disabled for deepseek-v4-flash unless users override it.
+        # Users wanting the thinking model can override via --model deepseek-v4-pro
+        # or --deepseek-thinking enabled/default.
         'model': 'deepseek-v4-flash',
         'env_var': 'DEEPSEEK_API_KEY',
         'api_base': 'https://api.deepseek.com'

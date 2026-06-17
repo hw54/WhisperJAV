@@ -6,6 +6,7 @@ from typing import Literal
 
 BatchStatus = Literal[
     "skip_external_subtitle",
+    "skip_duration_limit",
     "skip_translated",
     "translate_existing_japanese",
     "transcribe_then_translate",
@@ -29,6 +30,9 @@ class BatchOptions:
     translate_api_key: str | None = None
     translate_workers: int = 1
     translation_queue_size: int = 2
+    asr_retries: int = 1
+    translation_retries: int = 2
+    max_video_minutes: float = 230
     stream: bool = False
     debug: bool = False
     accept_cpu_mode: bool = False
@@ -46,7 +50,11 @@ class ClassifiedVideo:
     chinese_srt: Path | None = None
     nfo_path: Path | None = None
     actresses: tuple[str, ...] = ()
+    movie_title: str | None = None
+    movie_plot: str | None = None
     warnings: tuple[str, ...] = ()
+    duration_seconds: float | None = None
+    duration_limit_minutes: float | None = None
 
 
 @dataclass(frozen=True)
@@ -69,9 +77,14 @@ class VideoResult:
     reason: str | None = None
     nfo_path: Path | None = None
     actresses: tuple[str, ...] = ()
+    movie_title: str | None = None
+    movie_plot: str | None = None
     japanese_srt: Path | None = None
     chinese_srt: Path | None = None
+    summary_json: Path | None = None
     asr: ProcessResult | None = None
     translation: ProcessResult | None = None
     error: str | None = None
     warnings: tuple[str, ...] = ()
+    duration_seconds: float | None = None
+    duration_limit_minutes: float | None = None

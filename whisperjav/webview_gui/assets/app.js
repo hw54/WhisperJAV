@@ -7200,8 +7200,8 @@ const TranslationSettingsModal = {
         plot: '',
         sceneThreshold: 60,
         maxBatchSize: 30,
-        temperature: 0.5,
-        topP: 0.9,
+        temperature: null,
+        topP: null,
         customEndpoint: '',
         ollamaUrl: ''
     },
@@ -7279,8 +7279,8 @@ const TranslationSettingsModal = {
         this.settings.plot = document.getElementById('translationPlot')?.value || '';
         this.settings.sceneThreshold = parseInt(document.getElementById('translationSceneThreshold')?.value) || 60;
         this.settings.maxBatchSize = parseInt(document.getElementById('translationMaxBatchSize')?.value) || 30;
-        this.settings.temperature = parseFloat(document.getElementById('translationTemperature')?.value) || 0.5;
-        this.settings.topP = parseFloat(document.getElementById('translationTopP')?.value) || 0.9;
+        this.settings.temperature = this.parseOptionalFloat('translationTemperature');
+        this.settings.topP = this.parseOptionalFloat('translationTopP');
         this.settings.customEndpoint = document.getElementById('translationCustomEndpoint')?.value || '';
         this.settings.ollamaUrl = document.getElementById('translationOllamaUrl')?.value || '';
 
@@ -7342,8 +7342,8 @@ const TranslationSettingsModal = {
         document.getElementById('translationPlot').value = this.settings.plot;
         document.getElementById('translationSceneThreshold').value = this.settings.sceneThreshold;
         document.getElementById('translationMaxBatchSize').value = this.settings.maxBatchSize;
-        document.getElementById('translationTemperature').value = this.settings.temperature;
-        document.getElementById('translationTopP').value = this.settings.topP;
+        document.getElementById('translationTemperature').value = this.settings.temperature ?? '';
+        document.getElementById('translationTopP').value = this.settings.topP ?? '';
         document.getElementById('translationCustomEndpoint').value = this.settings.customEndpoint;
         const ollamaUrlEl = document.getElementById('translationOllamaUrl');
         if (ollamaUrlEl) ollamaUrlEl.value = this.settings.ollamaUrl || '';
@@ -7387,6 +7387,13 @@ const TranslationSettingsModal = {
         if (provider === 'local' && models.includes('gemma-9b')) {
             modelSelect.value = 'gemma-9b';
         }
+    },
+
+    parseOptionalFloat(elementId) {
+        const raw = document.getElementById(elementId)?.value?.trim() ?? '';
+        if (!raw) return null;
+        const parsed = parseFloat(raw);
+        return Number.isFinite(parsed) ? parsed : null;
     },
 
     async testConnection() {

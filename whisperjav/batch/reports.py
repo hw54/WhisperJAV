@@ -78,12 +78,17 @@ def _serialize_video_result(result: VideoResult) -> dict[str, Any]:
         "reason": result.reason,
         "nfo_path": _path_or_none(result.nfo_path),
         "actresses": list(result.actresses),
+        "movie_title": result.movie_title,
+        "movie_plot": result.movie_plot,
         "japanese_srt": _path_or_none(result.japanese_srt),
         "chinese_srt": _path_or_none(result.chinese_srt),
+        "summary_json": _path_or_none(result.summary_json),
         "asr": _serialize_process_result(result.asr),
         "translation": _serialize_process_result(result.translation),
         "error": result.error,
         "warnings": list(result.warnings),
+        "duration_seconds": result.duration_seconds,
+        "duration_limit_minutes": result.duration_limit_minutes,
     }
 
 

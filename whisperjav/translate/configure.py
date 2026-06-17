@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .settings import load_settings, save_settings, get_settings_path, DEFAULT_SETTINGS
 from .providers import PROVIDER_CONFIGS, SUPPORTED_TARGETS
+from .tones import TONE_CONFIGS, TONE_CHOICES
 
 
 def print_env_commands(provider: str, api_key: str, export_dotenv: bool = False):
@@ -139,14 +140,22 @@ def interactive_configure():
 
     # Translation tone
     print(f"\n5. Translation Tone/Style")
-    print("   1. standard (clean, professional)")
-    print("   2. pornify (explicit, adult-oriented)")
+    for idx, tone in enumerate(TONE_CHOICES, 1):
+        config = TONE_CONFIGS[tone]
+        print(f"   {idx}. {config.key} ({config.description})")
     current_tone = settings.get('tone', 'standard')
-    tone_choice = input(f"   Select tone [1-2] (Enter to keep {current_tone}): ").strip()
-    if tone_choice == '1':
-        settings['tone'] = 'standard'
-    elif tone_choice == '2':
-        settings['tone'] = 'pornify'
+    tone_choice = input(
+        f"   Select tone [1-{len(TONE_CHOICES)}] (Enter to keep {current_tone}): "
+    ).strip()
+    if tone_choice:
+        try:
+            tone_index = int(tone_choice) - 1
+        except ValueError:
+            tone_index = -1
+        if 0 <= tone_index < len(TONE_CHOICES):
+            settings['tone'] = TONE_CHOICES[tone_index]
+        else:
+            print(f"   Warning: Invalid tone choice '{tone_choice}', keeping {current_tone}")
 
     # Advanced settings
     print(f"\n6. Advanced Settings (optional)")

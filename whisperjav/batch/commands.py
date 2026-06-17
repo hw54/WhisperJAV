@@ -62,6 +62,8 @@ def build_translation_command(
     options: BatchOptions,
     *,
     actresses: list[str] | tuple[str, ...] = (),
+    movie_title: str | None = None,
+    movie_plot: str | None = None,
 ) -> list[str]:
     command = [
         sys.executable,
@@ -77,13 +79,17 @@ def build_translation_command(
         "--target",
         "chinese",
         "--tone",
-        "pornify",
+        "contextual",
         "--model",
         "deepseek-v4-flash",
     ]
     actress_context = options.actress or ", ".join(actresses)
     if actress_context:
         command.extend(["--actress", actress_context])
+    if movie_title:
+        command.extend(["--movie-title", movie_title])
+    if movie_plot:
+        command.extend(["--movie-plot", movie_plot])
     if options.stream:
         command.append("--stream")
     if options.debug:

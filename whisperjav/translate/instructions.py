@@ -177,7 +177,7 @@ def get_instruction_content(tone: str = 'standard', refresh: bool = False) -> Op
     3. Load bundled default (if all else fails)
 
     Args:
-        tone: Instruction tone (standard, pornify, etc.)
+        tone: Instruction tone (standard, contextual, pornify, etc.)
         refresh: Force refresh from network
 
     Returns:

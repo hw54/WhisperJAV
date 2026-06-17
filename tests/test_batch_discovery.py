@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+from whisperjav.batch import discovery
 from whisperjav.batch.discovery import classify_video, discover_media_files, is_valid_srt
 from whisperjav.batch.models import BatchOptions
 
@@ -14,6 +15,11 @@ def write_valid_srt(path: Path, text: str = "你好") -> None:
         f"{text}\n",
         encoding="utf-8",
     )
+
+
+@pytest.fixture(autouse=True)
+def short_media_duration(monkeypatch):
+    monkeypatch.setattr(discovery, "_probe_duration_seconds", lambda _path: 60.0, raising=False)
 
 
 def test_discovery_finds_videos_recursively_and_skips_audio_by_default(tmp_path):
@@ -183,6 +189,29 @@ def test_invalid_existing_translation_is_retranslated(tmp_path):
     assert item.chinese_srt is None
 
 
+def test_incomplete_existing_translation_is_retranslated(tmp_path):
+    video = tmp_path / "ABC-123.mp4"
+    japanese = tmp_path / "ABC-123.ja.pass1.srt"
+    chinese = tmp_path / "ABC-123.ja.pass1.chinese.srt"
+    video.write_text("video")
+    japanese.write_text(
+        "1\n00:00:00,000 --> 00:00:30,000\nはい\n\n"
+        "2\n00:01:50,000 --> 00:02:00,000\nはい\n",
+        encoding="utf-8",
+    )
+    chinese.write_text(
+        "1\n00:00:00,000 --> 00:00:30,000\n中文\n\n"
+        "2\n00:00:50,000 --> 00:01:00,000\n中文\n",
+        encoding="utf-8",
+    )
+
+    item = classify_video(video, BatchOptions(root=tmp_path))
+
+    assert item.status == "translate_existing_japanese"
+    assert item.reason == "invalid_existing_translation"
+    assert item.chinese_srt is None
+
+
 def test_no_reusable_srt_transcribes_then_translates(tmp_path):
     video = tmp_path / "ABC-123.mp4"
     video.write_text("video")
@@ -190,6 +219,69 @@ def test_no_reusable_srt_transcribes_then_translates(tmp_path):
     item = classify_video(video, BatchOptions(root=tmp_path))
 
     assert item.status == "transcribe_then_translate"
+
+
+def test_default_duration_limit_skips_videos_over_230_minutes(tmp_path, monkeypatch):
+    video = tmp_path / "LONG-001.mp4"
+    video.write_text("video")
+    duration_seconds = 231 * 60
+    monkeypatch.setattr(
+        discovery,
+        "_probe_duration_seconds",
+        lambda _path: duration_seconds,
+        raising=False,
+    )
+
+    item = classify_video(video, BatchOptions(root=tmp_path))
+
+    assert item.status == "skip_duration_limit"
+    assert item.reason == "duration_exceeds_limit"
+    assert item.duration_seconds == duration_seconds
+    assert item.duration_limit_minutes == 230
+
+
+def test_zero_duration_limit_disables_duration_probe(tmp_path, monkeypatch):
+    video = tmp_path / "LONG-001.mp4"
+    video.write_text("video")
+    calls = []
+
+    def fail_if_called(_path):
+        calls.append(_path)
+        return 999 * 60
+
+    monkeypatch.setattr(
+        discovery,
+        "_probe_duration_seconds",
+        fail_if_called,
+        raising=False,
+    )
+
+    item = classify_video(video, BatchOptions(root=tmp_path, max_video_minutes=0))
+
+    assert item.status == "transcribe_then_translate"
+    assert item.duration_seconds is None
+    assert calls == []
+
+
+def test_duration_probe_failure_is_failed_precondition(tmp_path, monkeypatch):
+    video = tmp_path / "BROKEN-001.mp4"
+    video.write_text("video")
+
+    def raise_probe_error(_path):
+        raise RuntimeError("ffprobe failed")
+
+    monkeypatch.setattr(
+        discovery,
+        "_probe_duration_seconds",
+        raise_probe_error,
+        raising=False,
+    )
+
+    item = classify_video(video, BatchOptions(root=tmp_path))
+
+    assert item.status == "failed_precondition"
+    assert item.reason == "duration_unavailable"
+    assert item.warnings == ("ffprobe failed",)
 
 
 def test_force_ignores_whisperjav_outputs_but_not_external_subtitles(tmp_path):

@@ -32,6 +32,7 @@ from typing import Callable, Optional
 from .providers import PROVIDER_CONFIGS, SUPPORTED_TARGETS
 from .settings import load_settings, DEFAULT_SETTINGS
 from .instructions import get_instruction_content
+from .tones import get_tone_default_options
 from .core import translate_subtitle, _normalize_api_base, _api_base_to_custom_server, cap_batch_size_for_context, compute_max_output_tokens
 
 logger = logging.getLogger(__name__)
@@ -101,7 +102,7 @@ def _resolve_instruction_file(tone: str = "standard", refresh: bool = False) -> 
     Resolve instruction file path by fetching content and caching to temp file.
 
     Args:
-        tone: Translation tone ('standard' or 'pornify')
+        tone: Translation tone ('standard', 'contextual', or 'pornify')
         refresh: Force refresh of cached content
 
     Returns:
@@ -144,16 +145,9 @@ def _build_provider_options(
     Returns:
         Dict of provider options
     """
-    # Start from tone-aware defaults
-    if tone == 'pornify':
-        default_temperature = 1.2
-        default_top_p = 0.9
-    else:
-        default_temperature = 0.5
-        default_top_p = 0.9
-
-    result_temp = default_temperature
-    result_top_p = default_top_p
+    defaults = get_tone_default_options(tone)
+    result_temp = defaults["temperature"]
+    result_top_p = defaults["top_p"]
 
     # Apply settings overrides
     if settings_model_params:
@@ -198,6 +192,7 @@ def translate_with_config(
     max_batch_size: Optional[int] = None,
     temperature: Optional[float] = None,
     top_p: Optional[float] = None,
+    deepseek_thinking: Optional[str] = None,
     stream: bool = False,
     debug: bool = False,
     extra_context: Optional[str] = None,
@@ -224,7 +219,7 @@ def translate_with_config(
         input_path: Path to input SRT file
         provider: AI provider name ('deepseek', 'openrouter', 'gemini', 'claude', 'gpt')
         target_lang: Target language ('english', 'chinese', 'indonesian', 'spanish')
-        tone: Translation tone ('standard' or 'pornify')
+        tone: Translation tone ('standard', 'contextual', or 'pornify')
         api_key: API key (or set via environment variable)
         model: Model override (uses provider default if not specified)
         source_lang: Source language ('japanese', 'korean', 'chinese')
@@ -234,6 +229,7 @@ def translate_with_config(
         max_batch_size: Maximum batch size for translation
         temperature: Model temperature (0.0-2.0)
         top_p: Model top_p (0.0-1.0)
+        deepseek_thinking: DeepSeek V4 thinking mode ('disabled', 'enabled', or 'default')
         stream: Stream translation progress
         debug: Enable debug output
         extra_context: Additional context for translation (movie title, etc.)
@@ -318,6 +314,8 @@ def translate_with_config(
         top_p=top_p,
         settings_model_params=settings.get('model_params')
     )
+    if deepseek_thinking is not None:
+        provider_options['deepseek_thinking'] = deepseek_thinking
 
     # Generate output path if not specified
     if output_path:
@@ -386,7 +384,7 @@ def translate_with_config(
             if ollama_max_tokens is not None:
                 max_tokens = ollama_max_tokens
 
-            if temperature is None and readiness.get('temperature'):
+            if temperature is None and tone == 'standard' and readiness.get('temperature'):
                 provider_options['temperature'] = readiness['temperature']
             provider_options['num_ctx'] = n_ctx
 

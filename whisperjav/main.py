@@ -68,6 +68,7 @@ fix_stdout()
 
 from whisperjav.utils.logger import setup_logger, logger
 from whisperjav.utils.device_detector import get_best_device
+from whisperjav.translate.tones import TONE_CHOICES
 from whisperjav.modules.media_discovery import MediaDiscovery
 from whisperjav.pipelines.faster_pipeline import FasterPipeline
 from whisperjav.pipelines.fast_pipeline import FastPipeline
@@ -409,7 +410,7 @@ def parse_arguments():
     )
     translation_group.add_argument(
         "--translate-tone",
-        choices=["standard", "pornify"],
+        choices=TONE_CHOICES,
         default="standard",
         help="Translation style (default: standard)"
     )

@@ -3146,8 +3146,8 @@ class WhisperJAVAPI:
                 'plot': backend.get('movie_plot', '') or '',
                 'sceneThreshold': backend.get('scene_threshold', 60),
                 'maxBatchSize': backend.get('max_batch_size', 30),
-                'temperature': model_params.get('temperature') or 0.5,
-                'topP': model_params.get('top_p') or 0.9,
+                'temperature': model_params.get('temperature'),
+                'topP': model_params.get('top_p'),
                 'customEndpoint': backend.get('custom_endpoint', '') or '',
                 'ollamaUrl': backend.get('ollama_url', '') or '',
                 'provider': backend.get('provider', ''),
@@ -3203,9 +3203,11 @@ class WhisperJAVAPI:
             # Nested model_params
             mp = existing.setdefault('model_params', {})
             if 'temperature' in settings:
-                mp['temperature'] = float(settings['temperature'])
+                value = settings['temperature']
+                mp['temperature'] = None if value in (None, '') else float(value)
             if 'topP' in settings:
-                mp['top_p'] = float(settings['topP'])
+                value = settings['topP']
+                mp['top_p'] = None if value in (None, '') else float(value)
 
             settings_path = get_settings_path()
             settings_path.parent.mkdir(parents=True, exist_ok=True)

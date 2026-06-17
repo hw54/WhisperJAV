@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
+import json
 from pathlib import Path
 from typing import Mapping, Sequence
 
@@ -17,6 +18,30 @@ def write_valid_srt(path: Path, text: str = "はい") -> None:
         f"{text}\n\n"
         "2\n00:00:01,000 --> 00:00:02,000\n"
         f"{text}\n",
+        encoding="utf-8",
+    )
+
+
+def write_valid_subtrans(path: Path) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "scenes": [
+                    {
+                        "scene": 1,
+                        "context": {"summary": "Scene summary"},
+                        "batches": [
+                            {
+                                "batch": 1,
+                                "summary": "Batch summary",
+                                "originals": [{"index": 1}, {"index": 2}],
+                            }
+                        ],
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
         encoding="utf-8",
     )
 
@@ -66,6 +91,7 @@ class FakeRunner:
             )
         srt = Path(command[command.index("-i") + 1])
         write_valid_srt(srt.with_name(f"{srt.stem}.chinese.srt"), "中文")
+        write_valid_subtrans(srt.with_suffix(".subtrans"))
         return ProcessResult(return_code=0, command_redacted=command, seconds=3.0)
 
 
@@ -82,6 +108,8 @@ def test_existing_japanese_srt_translation_completes(tmp_path: Path) -> None:
         japanese_srt=japanese,
         nfo_path=nfo,
         actresses=("Name1", "Name2"),
+        movie_title="Movie Title",
+        movie_plot="Movie Plot",
         warnings=("nfo_warning",),
     )
     runner = FakeRunner()
@@ -93,11 +121,18 @@ def test_existing_japanese_srt_translation_completes(tmp_path: Path) -> None:
     assert results[0].translation.return_code == 0
     assert results[0].nfo_path == nfo
     assert results[0].actresses == ("Name1", "Name2")
+    assert results[0].movie_title == "Movie Title"
+    assert results[0].movie_plot == "Movie Plot"
     assert results[0].warnings == ("nfo_warning",)
     assert results[0].japanese_srt == japanese
     assert results[0].chinese_srt == tmp_path / "ABC-123.ja.pass1.chinese.srt"
+    assert results[0].summary_json == tmp_path / "ABC-123.ja.pass1.chinese.summary.json"
+    assert results[0].summary_json.exists()
     assert any("whisperjav.translate.cli" in command for command in runner.commands)
     assert not any("whisperjav.main" in command for command in runner.commands)
+    translation_command = next(command for command in runner.commands if "whisperjav.translate.cli" in command)
+    assert translation_command[translation_command.index("--movie-title") + 1] == "Movie Title"
+    assert translation_command[translation_command.index("--movie-plot") + 1] == "Movie Plot"
 
 
 def test_transcribe_then_translate_runs_asr_before_translation(tmp_path: Path) -> None:
@@ -111,10 +146,38 @@ def test_transcribe_then_translate_runs_asr_before_translation(tmp_path: Path) -
     assert results[0].status == "completed"
     assert results[0].japanese_srt == tmp_path / "ABC-123.ja.pass1.srt"
     assert results[0].chinese_srt == tmp_path / "ABC-123.ja.pass1.chinese.srt"
+    assert results[0].summary_json == tmp_path / "ABC-123.ja.pass1.chinese.summary.json"
     assert [command[3] for command in runner.commands] == [
         "whisperjav.main",
         "whisperjav.translate.cli",
     ]
+
+
+class MissingSubtransRunner(FakeRunner):
+    def _run_translation(self, command: list[str]) -> ProcessResult:
+        srt = Path(command[command.index("-i") + 1])
+        write_valid_srt(srt.with_name(f"{srt.stem}.chinese.srt"), "中文")
+        return ProcessResult(return_code=0, command_redacted=command, seconds=3.0)
+
+
+def test_summary_export_failure_warns_without_failing_translation(tmp_path: Path) -> None:
+    video = tmp_path / "ABC-123.mp4"
+    japanese = tmp_path / "ABC-123.ja.pass1.srt"
+    video.write_text("video", encoding="utf-8")
+    write_valid_srt(japanese)
+    item = ClassifiedVideo(
+        video_path=video,
+        status="translate_existing_japanese",
+        japanese_srt=japanese,
+    )
+    runner = MissingSubtransRunner()
+
+    results = BatchScheduler(BatchOptions(root=tmp_path), runner=runner).run([item])
+
+    assert results[0].status == "completed_translation_only"
+    assert results[0].summary_json is None
+    assert len(results[0].warnings) == 1
+    assert results[0].warnings[0].startswith("scene_summary_export_failed:")
 
 
 def test_asr_failure_does_not_enqueue_translation(tmp_path: Path) -> None:
@@ -127,7 +190,67 @@ def test_asr_failure_does_not_enqueue_translation(tmp_path: Path) -> None:
 
     assert results[0].status == "failed_asr"
     assert results[0].error == "asr failed"
-    assert len(runner.commands) == 1
+    assert len(runner.commands) == 2
+
+
+class FlakyAsrRunner(FakeRunner):
+    def __init__(self) -> None:
+        super().__init__()
+        self.asr_attempts = 0
+
+    def _run_asr(self, command: list[str]) -> ProcessResult:
+        self.asr_attempts += 1
+        if self.asr_attempts == 1:
+            return ProcessResult(
+                return_code=9,
+                command_redacted=command,
+                stderr_tail="temporary asr failure",
+            )
+        return super()._run_asr(command)
+
+
+def test_asr_retries_before_translation(tmp_path: Path) -> None:
+    video = tmp_path / "ABC-123.mp4"
+    video.write_text("video", encoding="utf-8")
+    item = ClassifiedVideo(video_path=video, status="transcribe_then_translate")
+    runner = FlakyAsrRunner()
+
+    results = BatchScheduler(BatchOptions(root=tmp_path, asr_retries=1), runner=runner).run([item])
+
+    assert results[0].status == "completed"
+    assert runner.asr_attempts == 2
+    assert [command[3] for command in runner.commands] == [
+        "whisperjav.main",
+        "whisperjav.main",
+        "whisperjav.translate.cli",
+    ]
+
+
+class InterruptedAsrReturnRunner(FakeRunner):
+    def __init__(self) -> None:
+        super().__init__()
+        self.asr_attempts = 0
+
+    def _run_asr(self, command: list[str]) -> ProcessResult:
+        self.asr_attempts += 1
+        return ProcessResult(
+            return_code=130,
+            command_redacted=command,
+            stderr_tail="asr interrupted",
+        )
+
+
+def test_asr_interrupt_return_code_is_not_retried(tmp_path: Path) -> None:
+    video = tmp_path / "ABC-123.mp4"
+    video.write_text("video", encoding="utf-8")
+    item = ClassifiedVideo(video_path=video, status="transcribe_then_translate")
+    runner = InterruptedAsrReturnRunner()
+
+    results = BatchScheduler(BatchOptions(root=tmp_path, asr_retries=2), runner=runner).run([item])
+
+    assert results[0].status == "failed_asr"
+    assert results[0].error == "asr interrupted"
+    assert runner.asr_attempts == 1
 
 
 def test_translation_failure_keeps_processing_later_items(tmp_path: Path) -> None:
@@ -155,6 +278,83 @@ def test_translation_failure_keeps_processing_later_items(tmp_path: Path) -> Non
     ]
     assert results[0].error == "translation failed"
     assert results[1].chinese_srt == translated
+
+
+class FlakyTranslationRunner(FakeRunner):
+    def __init__(self) -> None:
+        super().__init__()
+        self.translation_attempts = 0
+
+    def _run_translation(self, command: list[str]) -> ProcessResult:
+        self.translation_attempts += 1
+        if self.translation_attempts == 1:
+            return ProcessResult(
+                return_code=8,
+                command_redacted=command,
+                stderr_tail="temporary translation failure",
+            )
+        return super()._run_translation(command)
+
+
+def test_translation_retries_before_successful_result(tmp_path: Path) -> None:
+    video = tmp_path / "ABC-123.mp4"
+    japanese = tmp_path / "ABC-123.ja.pass1.srt"
+    video.write_text("video", encoding="utf-8")
+    write_valid_srt(japanese)
+    item = ClassifiedVideo(
+        video_path=video,
+        status="translate_existing_japanese",
+        japanese_srt=japanese,
+    )
+    runner = FlakyTranslationRunner()
+
+    results = BatchScheduler(
+        BatchOptions(root=tmp_path, translation_retries=1),
+        runner=runner,
+    ).run([item])
+
+    assert results[0].status == "completed_translation_only"
+    assert runner.translation_attempts == 2
+    assert [command[3] for command in runner.commands] == [
+        "whisperjav.translate.cli",
+        "whisperjav.translate.cli",
+    ]
+
+
+class InterruptedTranslationReturnRunner(FakeRunner):
+    def __init__(self) -> None:
+        super().__init__()
+        self.translation_attempts = 0
+
+    def _run_translation(self, command: list[str]) -> ProcessResult:
+        self.translation_attempts += 1
+        return ProcessResult(
+            return_code=130,
+            command_redacted=command,
+            stderr_tail="translation interrupted",
+        )
+
+
+def test_translation_interrupt_return_code_is_not_retried(tmp_path: Path) -> None:
+    video = tmp_path / "ABC-123.mp4"
+    japanese = tmp_path / "ABC-123.ja.pass1.srt"
+    video.write_text("video", encoding="utf-8")
+    write_valid_srt(japanese)
+    item = ClassifiedVideo(
+        video_path=video,
+        status="translate_existing_japanese",
+        japanese_srt=japanese,
+    )
+    runner = InterruptedTranslationReturnRunner()
+
+    results = BatchScheduler(
+        BatchOptions(root=tmp_path, translation_retries=2),
+        runner=runner,
+    ).run([item])
+
+    assert results[0].status == "failed_translation"
+    assert results[0].error == "translation interrupted"
+    assert runner.translation_attempts == 1
 
 
 def test_dry_run_returns_classification_without_subprocesses(tmp_path: Path) -> None:
@@ -294,7 +494,7 @@ def test_full_translation_queue_blocks_before_next_asr(tmp_path: Path) -> None:
     assert results == [["completed", "completed"]]
 
 
-@pytest.mark.parametrize("translate_workers", [0, 5])
+@pytest.mark.parametrize("translate_workers", [0])
 def test_translate_workers_range_is_validated(
     tmp_path: Path,
     translate_workers: int,
@@ -303,9 +503,21 @@ def test_translate_workers_range_is_validated(
         BatchScheduler(BatchOptions(root=tmp_path, translate_workers=translate_workers))
 
 
+def test_translate_workers_accepts_api_parallelism(tmp_path: Path) -> None:
+    scheduler = BatchScheduler(BatchOptions(root=tmp_path, translate_workers=20))
+
+    assert scheduler.options.translate_workers == 20
+
+
 def test_translation_queue_size_is_validated(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="translation_queue_size"):
         BatchScheduler(BatchOptions(root=tmp_path, translation_queue_size=0))
+
+
+@pytest.mark.parametrize("field", ["asr_retries", "translation_retries"])
+def test_retry_counts_must_not_be_negative(tmp_path: Path, field: str) -> None:
+    with pytest.raises(ValueError, match=field):
+        BatchScheduler(BatchOptions(root=tmp_path, **{field: -1}))
 
 
 class MissingSrtRunner(FakeRunner):
@@ -323,7 +535,7 @@ def test_successful_asr_with_missing_expected_srt_fails_asr(tmp_path: Path) -> N
 
     assert results[0].status == "failed_asr"
     assert "expected Japanese SRT missing or invalid" in results[0].error
-    assert len(runner.commands) == 1
+    assert len(runner.commands) == 2
 
 
 class InterruptingRunner(FakeRunner):

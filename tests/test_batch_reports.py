@@ -19,6 +19,7 @@ def test_batch_report_writer_writes_jsonl_and_summary_without_secrets(tmp_path):
     video = input_root / "ABC-123.mp4"
     japanese = input_root / "ABC-123.ja.pass1.srt"
     chinese = input_root / "ABC-123.ja.pass1.chinese.srt"
+    summary_json = input_root / "ABC-123.ja.pass1.chinese.summary.json"
     nfo = input_root / "ABC-123.nfo"
     writer = BatchReportWriter(report_dir, input_root)
     results = [
@@ -29,6 +30,7 @@ def test_batch_report_writer_writes_jsonl_and_summary_without_secrets(tmp_path):
             actresses=("Actor One",),
             japanese_srt=japanese,
             chinese_srt=chinese,
+            summary_json=summary_json,
             asr=ProcessResult(seconds=1.25, return_code=0, command_redacted=("asr", str(video))),
             translation=ProcessResult(
                 seconds=2.5,
@@ -77,6 +79,7 @@ def test_batch_report_writer_writes_jsonl_and_summary_without_secrets(tmp_path):
     assert records[0]["nfo_path"] == str(nfo)
     assert records[0]["japanese_srt"] == str(japanese)
     assert records[0]["chinese_srt"] == str(chinese)
+    assert records[0]["summary_json"] == str(summary_json)
     assert records[0]["status"] == "completed"
     assert records[0]["translation"]["api_key_source"] == "env"
     assert summary["input_root"] == str(input_root)
