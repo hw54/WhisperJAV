@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -81,6 +82,48 @@ def test_parse_args_accepts_high_translation_worker_count(tmp_path):
     assert args.translate_workers == 20
 
 
+def test_parse_args_accepts_staged_asr_mode_and_cpu_workers(tmp_path):
+    args = cli.parse_args(
+        [str(tmp_path), "--asr-mode", "staged", "--asr-cpu-workers", "3"]
+    )
+
+    assert args.asr_mode == "staged"
+    assert args.asr_cpu_workers == 3
+
+
+def test_parse_args_accepts_run_minutes(tmp_path):
+    args = cli.parse_args([str(tmp_path), "--run-minutes", "30.5"])
+
+    assert args.run_minutes == 30.5
+
+
+def test_parse_args_accepts_max_consecutive_gpu_errors(tmp_path):
+    args = cli.parse_args([str(tmp_path), "--max-consecutive-gpu-errors", "2"])
+
+    assert args.max_consecutive_gpu_errors == 2
+
+
+def test_parse_args_defaults_run_minutes_to_unlimited(tmp_path):
+    args = cli.parse_args([str(tmp_path)])
+
+    assert args.run_minutes is None
+
+
+def test_parse_args_rejects_negative_run_minutes(tmp_path):
+    with pytest.raises(SystemExit):
+        cli.parse_args([str(tmp_path), "--run-minutes", "-1"])
+
+
+def test_parse_args_rejects_invalid_asr_cpu_workers(tmp_path):
+    with pytest.raises(SystemExit):
+        cli.parse_args([str(tmp_path), "--asr-cpu-workers", "0"])
+
+
+def test_parse_args_rejects_negative_max_consecutive_gpu_errors(tmp_path):
+    with pytest.raises(SystemExit):
+        cli.parse_args([str(tmp_path), "--max-consecutive-gpu-errors", "-1"])
+
+
 def test_parse_args_accepts_no_progress(tmp_path):
     args = cli.parse_args([str(tmp_path), "--no-progress"])
 
@@ -130,6 +173,72 @@ def test_dry_run_writes_reports_and_returns_zero(tmp_path, capsys):
     assert "WHISPERJAV BATCH SUMMARY" in captured.out
     assert "transcribe_then_translate: 1" in captured.out
     assert str(report_dir) in captured.out
+
+
+def test_cli_prints_discovery_status_before_processing(tmp_path, monkeypatch, capsys):
+    short_video = tmp_path / "SHORT-001.mp4"
+    long_video = tmp_path / "LONG-001.mp4"
+    short_video.write_text("video", encoding="utf-8")
+    long_video.write_text("video", encoding="utf-8")
+    report_dir = tmp_path / "reports"
+
+    def duration(path):
+        if path == long_video:
+            return 231 * 60
+        return 60.0
+
+    monkeypatch.setattr(discovery, "_probe_duration_seconds", duration, raising=False)
+
+    code = cli.main([str(tmp_path), "--dry-run", "--report-dir", str(report_dir)])
+
+    assert code == 0
+    captured = capsys.readouterr()
+    assert f"正在搜索目录：{tmp_path}" in captured.err
+    assert f"找到2部影片：{tmp_path}" in captured.err
+    assert f"排除1部大于230分钟的影片：{tmp_path}" in captured.err
+    assert "待ASR+翻译1部" in captured.err
+
+
+def test_cli_prints_run_deadline_when_run_minutes_is_set(tmp_path, monkeypatch, capsys):
+    video = tmp_path / "ABC-123.mp4"
+    video.write_text("video", encoding="utf-8")
+    report_dir = tmp_path / "reports"
+    now = datetime(2026, 6, 18, 10, 0, 0, tzinfo=timezone(timedelta(hours=8)))
+    monkeypatch.setattr(cli, "_local_now", lambda: now, raising=False)
+
+    code = cli.main(
+        [
+            str(tmp_path),
+            "--dry-run",
+            "--run-minutes",
+            "30",
+            "--report-dir",
+            str(report_dir),
+        ]
+    )
+
+    assert code == 0
+    captured = capsys.readouterr()
+    assert (
+        "运行时间限制：将在 2026-06-18T10:30:00+08:00 截止，"
+        "之后不再安排新任务，已安排任务会收尾。"
+    ) in captured.err
+    assert captured.err.index("运行时间限制：") < captured.err.index("正在搜索目录：")
+
+
+def test_cli_report_uses_run_start_and_end_timestamps(tmp_path, monkeypatch):
+    video = tmp_path / "ABC-123.mp4"
+    video.write_text("video", encoding="utf-8")
+    report_dir = tmp_path / "reports"
+    timestamps = iter(["2026-06-17T00:00:00Z", "2026-06-17T00:00:03Z"])
+    monkeypatch.setattr(cli, "_utc_timestamp", lambda: next(timestamps))
+
+    code = cli.main([str(tmp_path), "--dry-run", "--report-dir", str(report_dir)])
+
+    assert code == 0
+    summary = read_single_summary(report_dir)
+    assert summary["started_at"] == "2026-06-17T00:00:00Z"
+    assert summary["ended_at"] == "2026-06-17T00:00:03Z"
 
 
 def test_dry_run_reports_duration_limited_skips(tmp_path, monkeypatch):
@@ -235,11 +344,63 @@ def test_cli_uses_progress_reporter_by_default(tmp_path, monkeypatch):
 
     monkeypatch.setattr(cli, "BatchScheduler", RecordingScheduler)
     monkeypatch.setattr(cli, "TqdmBatchProgress", lambda: sentinel_progress, raising=False)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
 
     code = cli.main([str(tmp_path), "--report-dir", str(report_dir)])
 
     assert code == 0
     assert progress_values == [sentinel_progress]
+
+
+def test_cli_wraps_scheduler_run_with_tqdm_logging_when_progress_enabled(
+    tmp_path,
+    monkeypatch,
+):
+    video = tmp_path / "ABC-123.mp4"
+    video.write_text("video", encoding="utf-8")
+    report_dir = tmp_path / "reports"
+    events = []
+
+    class RecordingProgress:
+        file = object()
+
+    class RecordingLoggingContext:
+        def __init__(self, *, file=None):
+            events.append(("context_init", file))
+
+        def __enter__(self):
+            events.append(("context_enter", None))
+
+        def __exit__(self, exc_type, exc, tb):
+            events.append(("context_exit", exc_type))
+
+    class RecordingScheduler:
+        def __init__(self, options, *, progress=None):
+            self.options = options
+            self.progress = progress
+
+        def run(self, classified):
+            events.append(("scheduler_run", self.progress))
+            return [
+                VideoResult(video_path=item.video_path, status=item.status)
+                for item in classified
+            ]
+
+    progress = RecordingProgress()
+    monkeypatch.setattr(cli, "BatchScheduler", RecordingScheduler)
+    monkeypatch.setattr(cli, "TqdmBatchProgress", lambda: progress, raising=False)
+    monkeypatch.setattr(cli, "tqdm_console_logging", RecordingLoggingContext, raising=False)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+
+    code = cli.main([str(tmp_path), "--report-dir", str(report_dir)])
+
+    assert code == 0
+    assert events[:3] == [
+        ("context_init", progress.file),
+        ("context_enter", None),
+        ("scheduler_run", progress),
+    ]
+    assert events[3][0] == "context_exit"
 
 
 def test_cli_disables_progress_when_streaming_subprocess_output(tmp_path, monkeypatch, capsys):
@@ -262,6 +423,7 @@ def test_cli_disables_progress_when_streaming_subprocess_output(tmp_path, monkey
 
     monkeypatch.setattr(cli, "BatchScheduler", RecordingScheduler)
     monkeypatch.setattr(cli, "TqdmBatchProgress", lambda: object(), raising=False)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
 
     code = cli.main([str(tmp_path), "--stream", "--report-dir", str(report_dir)])
 
@@ -269,6 +431,25 @@ def test_cli_disables_progress_when_streaming_subprocess_output(tmp_path, monkey
     assert code == 0
     assert progress_values == [None]
     assert "Batch progress disabled because --stream is enabled." in captured.err
+
+
+def test_cli_fails_fast_without_deepseek_api_key(tmp_path, monkeypatch, capsys):
+    video = tmp_path / "ABC-123.mp4"
+    video.write_text("video", encoding="utf-8")
+    report_dir = tmp_path / "reports"
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+
+    class FailingScheduler:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("scheduler should not start without DeepSeek API key")
+
+    monkeypatch.setattr(cli, "BatchScheduler", FailingScheduler)
+
+    code = cli.main([str(tmp_path), "--report-dir", str(report_dir)])
+
+    captured = capsys.readouterr()
+    assert code == 2
+    assert "DEEPSEEK_API_KEY is not set" in captured.err
 
 
 def test_multi_root_explicit_report_dir_uses_root_subdirectories(tmp_path):

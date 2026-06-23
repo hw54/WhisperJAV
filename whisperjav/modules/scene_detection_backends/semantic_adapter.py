@@ -30,6 +30,8 @@ import soundfile as sf
 
 from whisperjav.utils.logger import logger
 
+SEMANTIC_ENGINE_LOGGER_NAME = "whisperjav.semantic_audio_clustering"
+
 
 @dataclass
 class SemanticClusteringConfig:
@@ -162,7 +164,7 @@ class SemanticClusteringAdapter:
                 setattr(config, key, kwargs[key])
 
         self.config = config
-        self.logger = logger_instance
+        self.logger = logger_instance or _default_engine_logger()
         self.progress_callback = progress_callback
 
         # Lazy-loaded engine reference
@@ -501,3 +503,9 @@ class SemanticClusteringAdapter:
                 }
 
         return None
+
+
+def _default_engine_logger() -> logging.Logger:
+    engine_logger = logging.getLogger(SEMANTIC_ENGINE_LOGGER_NAME)
+    engine_logger.setLevel(logging.WARNING)
+    return engine_logger

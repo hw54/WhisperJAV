@@ -28,9 +28,13 @@ See: docs/architecture/QWEN-PIPELINE-REFERENCE.md
 import json
 import os
 import shutil
+import sys
 import time
+from contextlib import redirect_stderr, redirect_stdout
+from dataclasses import dataclass
 from datetime import timedelta
 from enum import Enum
+from io import StringIO
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -92,6 +96,28 @@ def _segment_vad_scenes(segmenter, vad_scene_paths: List[Tuple[str, float, float
         return speech_regions_per_scene
     finally:
         segmenter.cleanup()
+
+
+def _write_scene_srt(result, scene_srt_path: Path) -> None:
+    with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+        result.to_srt_vtt(
+            str(scene_srt_path),
+            word_level=False,
+            segment_level=True,
+            strip=True,
+        )
+
+
+@dataclass(frozen=True)
+class QwenPreparedJob:
+    media_info: Dict[str, Any]
+    media_basename: str
+    master_metadata: Dict[str, Any]
+    pipeline_start: float
+    scene_paths: List[Tuple[str, float, float, float]]
+    vad_scene_paths: List[Tuple[str, float, float, float]]
+    orch_vad_paths: Optional[List[Tuple[str, float, float, float]]]
+    speech_regions_per_scene: Dict[int, Any]
 
 
 class QwenPipeline(BasePipeline):
@@ -182,6 +208,7 @@ class QwenPipeline(BasePipeline):
 
         # Output
         subs_language: str = "native",
+        batch_status_prefix: Optional[str] = None,
 
         **kwargs,
     ):
@@ -195,6 +222,7 @@ class QwenPipeline(BasePipeline):
 
         # Progress display
         self.progress_display = progress_display
+        self.batch_status_prefix = batch_status_prefix
 
         # === Input Mode Configuration ===
         # Parse input mode — legacy modes are mapped to assembly configs
@@ -380,6 +408,10 @@ class QwenPipeline(BasePipeline):
     def get_mode_name(self) -> str:
         return "qwen"
 
+    def _emit_batch_status(self, text: str) -> None:
+        if self.batch_status_prefix:
+            print(f"{self.batch_status_prefix} - {text}", file=sys.stderr, flush=True)
+
     # ------------------------------------------------------------------
     # Context resolution
     # ------------------------------------------------------------------
@@ -544,6 +576,476 @@ class QwenPipeline(BasePipeline):
     # ------------------------------------------------------------------
     # Main processing
     # ------------------------------------------------------------------
+
+    def prepare(self, media_info: Dict) -> QwenPreparedJob:
+        """Run CPU/IO-heavy Qwen phases before ASR text generation."""
+        input_file = Path(media_info["path"])
+        media_basename = media_info["basename"]
+        pipeline_start = time.time()
+
+        logger.info(
+            "[QwenPipeline PID %s] Preparing: %s (model=%s)",
+            os.getpid(), input_file.name, self.model_id,
+        )
+        self._emit_batch_status("准备开始")
+
+        master_metadata = {
+            "metadata_master": {
+                "structure_version": "1.0.0",
+                "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            },
+            "input_file": str(input_file),
+            "basename": media_basename,
+            "pipeline": "qwen",
+            "model_id": self.model_id,
+            "stages": {},
+            "output_files": {},
+            "summary": {},
+        }
+
+        logger.info("[QwenPipeline PID %s] Phase 1: Extracting audio from %s", os.getpid(), input_file.name)
+        self._emit_batch_status("Phase 1/4 提取音频")
+        phase1_start = time.time()
+        audio_path = self.temp_dir / f"{media_basename}_extracted.wav"
+        extracted_audio, duration = self.audio_extractor.extract(input_file, audio_path)
+        master_metadata["duration_seconds"] = duration
+        master_metadata["stages"]["extraction"] = {
+            "audio_path": str(extracted_audio),
+            "duration": duration,
+            "sample_rate": self.audio_extractor.sample_rate,
+            "time_sec": time.time() - phase1_start,
+        }
+        logger.info("[QwenPipeline PID %s] Phase 1: Complete (%.1fs audio)", os.getpid(), duration)
+        self._emit_batch_status(f"Phase 1/4 提取音频完成：{duration:.1f}s")
+
+        logger.info(
+            "[QwenPipeline PID %s] Phase 2: Scene detection (method=%s, safe_chunking=%s)",
+            os.getpid(), self.scene_method, self.safe_chunking,
+        )
+        self._emit_batch_status(f"Phase 2/4 scene划分：{self.scene_method}")
+        phase2_start = time.time()
+        scenes_dir = self.temp_dir / "scenes"
+        scenes_dir.mkdir(exist_ok=True)
+
+        from whisperjav.modules.scene_detection_backends import SceneDetectorFactory
+
+        scene_detector_kwargs = {"method": self.scene_method}
+        if self.safe_chunking:
+            min_dur = self.scene_min_override if self.scene_min_override is not None else 12
+            max_dur = self.scene_max_override if self.scene_max_override is not None else 48
+            scene_detector_kwargs["min_duration"] = min_dur
+            scene_detector_kwargs["max_duration"] = max_dur
+            logger.info(
+                "[QwenPipeline PID %s] Phase 2: Safe chunking "
+                "(min=%ss, max=%ss, aligner limit=180s)",
+                os.getpid(), min_dur, max_dur,
+            )
+
+        scene_detector = SceneDetectorFactory.safe_create_from_legacy_kwargs(**scene_detector_kwargs)
+        result = scene_detector.detect_scenes(extracted_audio, scenes_dir, media_basename)
+        scene_paths = result.to_legacy_tuples()
+        scene_detector.cleanup()
+        logger.info(
+            "[QwenPipeline PID %s] Phase 2: Detected %d scenes (method=%s)",
+            os.getpid(), len(scene_paths), self.scene_method,
+        )
+        self._emit_batch_status(f"Phase 2/4 scene划分完成：{len(scene_paths)}个scene")
+        if scene_paths:
+            durations = [sp[3] for sp in scene_paths]
+            logger.info(
+                "[QwenPipeline PID %s] Phase 2: Scene durations — "
+                "total %.0fs, range %.0f–%.0f, mean %.0f",
+                os.getpid(), sum(durations), min(durations), max(durations),
+                sum(durations) / len(durations),
+            )
+
+        detection_meta = result.to_metadata_dict()
+        master_metadata["stages"]["scene_detection"] = {
+            "method": self.scene_method,
+            "scenes_detected": len(scene_paths),
+            "time_sec": time.time() - phase2_start,
+        }
+        if detection_meta.get("scenes_detected"):
+            master_metadata["scenes_detected"] = detection_meta["scenes_detected"]
+        if detection_meta.get("coarse_boundaries"):
+            master_metadata["coarse_boundaries"] = detection_meta["coarse_boundaries"]
+
+        logger.info("[QwenPipeline PID %s] Phase 3: Speech enhancement (backend=%s)", os.getpid(), self.enhancer_backend)
+        self._emit_batch_status(f"Phase 3/4 语音增强：{self.enhancer_backend}")
+        phase3_start = time.time()
+        vad_scene_paths = None
+        orch_vad_paths = None
+
+        if is_passthrough_backend(self.enhancer_backend):
+            if self._enhance_for_vad:
+                logger.warning(
+                    "[QwenPipeline PID %s] Phase 3: --enhance-for-vad ignored — "
+                    "no speech enhancer configured (backend=%s)",
+                    os.getpid(), self.enhancer_backend,
+                )
+            logger.info(
+                "[QwenPipeline PID %s] Phase 3: Passthrough — %d scenes at 16kHz, skipping enhancement",
+                os.getpid(), len(scene_paths),
+            )
+        elif self._enhance_for_vad:
+            logger.info(
+                "[QwenPipeline PID %s] Phase 3: Dual-track mode — "
+                "enhanced audio for VAD/framing, original for ASR",
+                os.getpid(),
+            )
+            enhancer = create_enhancer_direct(
+                backend=self.enhancer_backend,
+                model=self.enhancer_model,
+            )
+
+            def _enhancement_progress(scene_num, total, scene_name):
+                logger.debug(f"Enhancing scene {scene_num}/{total}: {scene_name}")
+
+            enhanced_paths = enhance_scenes(
+                scene_paths, enhancer, self.temp_dir,
+                progress_callback=_enhancement_progress,
+            )
+            original_16k_paths = resample_scenes(scene_paths, self.temp_dir)
+            enhancer.cleanup()
+            del enhancer
+            from whisperjav.utils.gpu_utils import safe_cuda_cleanup
+            safe_cuda_cleanup()
+
+            vad_scene_paths = enhanced_paths
+            orch_vad_paths = enhanced_paths
+            scene_paths = original_16k_paths
+        else:
+            enhancer = create_enhancer_direct(
+                backend=self.enhancer_backend,
+                model=self.enhancer_model,
+            )
+
+            def _enhancement_progress(scene_num, total, scene_name):
+                logger.debug(f"Enhancing scene {scene_num}/{total}: {scene_name}")
+
+            scene_paths = enhance_scenes(
+                scene_paths, enhancer, self.temp_dir,
+                progress_callback=_enhancement_progress,
+            )
+            enhancer.cleanup()
+            del enhancer
+            from whisperjav.utils.gpu_utils import safe_cuda_cleanup
+            safe_cuda_cleanup()
+
+        if vad_scene_paths is None:
+            vad_scene_paths = scene_paths
+
+        master_metadata["stages"]["enhancement"] = {
+            "backend": self.enhancer_backend,
+            "dual_track": orch_vad_paths is not None,
+            "time_sec": time.time() - phase3_start,
+        }
+        logger.info("[QwenPipeline PID %s] Phase 3: Complete (%.1fs)", os.getpid(), time.time() - phase3_start)
+        self._emit_batch_status("Phase 3/4 语音增强完成")
+
+        speech_regions_per_scene = {}
+        if self.segmenter_backend != "none":
+            logger.info("[QwenPipeline PID %s] Phase 4: Speech segmentation (backend=%s)", os.getpid(), self.segmenter_backend)
+            self._emit_batch_status(f"Phase 4/4 WhisperSeg/VAD：{self.segmenter_backend}")
+            phase4_start = time.time()
+
+            from whisperjav.modules.speech_segmentation import SpeechSegmenterFactory
+            segmenter_kwargs = dict(self.segmenter_config or {})
+            segmenter_kwargs["max_group_duration_s"] = self.segmenter_max_group_duration
+            segmenter_kwargs["chunk_threshold_s"] = self.segmenter_chunk_threshold
+            segmenter = SpeechSegmenterFactory.create(
+                self.segmenter_backend,
+                **segmenter_kwargs,
+            )
+            speech_regions_per_scene = _segment_vad_scenes(
+                segmenter=segmenter,
+                vad_scene_paths=vad_scene_paths,
+            )
+            del segmenter
+
+            master_metadata["stages"]["segmentation"] = {
+                "backend": self.segmenter_backend,
+                "scenes_with_vad": len(speech_regions_per_scene),
+                "time_sec": time.time() - phase4_start,
+            }
+            logger.info("[QwenPipeline PID %s] Phase 4: Complete (%.1fs)", os.getpid(), time.time() - phase4_start)
+            self._emit_batch_status(
+                f"Phase 4/4 WhisperSeg/VAD完成：{len(speech_regions_per_scene)}个scene"
+            )
+        else:
+            logger.info("[QwenPipeline PID %s] Phase 4: Skipped (segmenter=none)", os.getpid())
+            self._emit_batch_status("Phase 4/4 WhisperSeg/VAD跳过")
+        self._emit_batch_status("准备完成，等待GPU转录")
+
+        return QwenPreparedJob(
+            media_info=media_info,
+            media_basename=media_basename,
+            master_metadata=master_metadata,
+            pipeline_start=pipeline_start,
+            scene_paths=scene_paths,
+            vad_scene_paths=vad_scene_paths,
+            orch_vad_paths=orch_vad_paths,
+            speech_regions_per_scene=speech_regions_per_scene,
+        )
+
+    def transcribe_prepared(self, prepared: QwenPreparedJob) -> Dict:
+        """Run ASR generation and final SRT assembly for a prepared Qwen job."""
+        media_basename = prepared.media_basename
+        master_metadata = prepared.master_metadata
+        scene_paths = prepared.scene_paths
+        speech_regions_per_scene = prepared.speech_regions_per_scene
+        pipeline_start = prepared.pipeline_start
+
+        logger.info("[QwenPipeline PID %s] Phase 5: ASR transcription (model=%s, mode=%s)",
+                    os.getpid(), self.model_id, self.input_mode.value)
+        self._emit_batch_status(f"Phase 5 GPU转录：{self.model_id}")
+        phase5_start = time.time()
+
+        raw_subs_dir = self.temp_dir / "raw_subs"
+        raw_subs_dir.mkdir(exist_ok=True)
+        scene_results: List[Tuple[Optional[stable_whisper.WhisperResult], int]] = []
+
+        self._subtitle_pipeline.artifacts_dir = raw_subs_dir
+        orch_audio_paths = [Path(sp[0]) for sp in scene_paths]
+        orch_durations = [sp[3] for sp in scene_paths]
+
+        orch_speech_regions = None
+        orch_speech_groups = None
+        if speech_regions_per_scene:
+            orch_speech_regions = []
+            orch_speech_groups = []
+            for idx in range(len(scene_paths)):
+                if idx in speech_regions_per_scene:
+                    seg_result = speech_regions_per_scene[idx]
+                    orch_speech_regions.append(
+                        [(s.start_sec, s.end_sec) for s in seg_result.segments]
+                    )
+                    orch_speech_groups.append([
+                        [(s.start_sec, s.end_sec) for s in group]
+                        for group in seg_result.groups
+                    ])
+                else:
+                    orch_speech_regions.append([])
+                    orch_speech_groups.append([])
+
+        orch_vad_paths = (
+            [Path(sp[0]) for sp in prepared.orch_vad_paths]
+            if prepared.orch_vad_paths else None
+        )
+
+        orch_results = self._subtitle_pipeline.process_scenes(
+            scene_audio_paths=orch_audio_paths,
+            scene_durations=orch_durations,
+            scene_speech_regions=orch_speech_regions,
+            scene_speech_groups=orch_speech_groups,
+            vad_audio_paths=orch_vad_paths,
+        )
+
+        for idx, (result, _diag) in enumerate(orch_results):
+            scene_results.append((result, idx))
+
+        orch_stats = self._subtitle_pipeline.sentinel_stats
+        self._sentinel_stats = {
+            "alignment_collapses": orch_stats.get("collapsed_scenes", 0),
+            "alignment_recoveries": orch_stats.get("recovered_scenes", 0),
+        }
+
+        for idx, (_result, diag) in enumerate(orch_results):
+            try:
+                diag_path = raw_subs_dir / f"scene_{idx:04d}_diagnostics.json"
+                diag_path.write_text(
+                    json.dumps(diag, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+            except Exception:
+                pass
+
+        n_success = sum(1 for r, _ in orch_results if r is not None and r.segments)
+        n_empty = sum(1 for r, _ in orch_results if r is not None and not r.segments)
+        n_failed = sum(1 for r, _ in orch_results if r is None)
+        _total_segs = sum(len(r.segments) for r, _ in orch_results if r is not None and r.segments)
+        logger.info("[QwenPipeline] Phase 5 assembly summary:")
+        logger.info(
+            "  Scenes:    %d success, %d empty, %d failed (of %d)",
+            n_success, n_empty, n_failed, len(orch_results),
+        )
+        logger.info(
+            "  Segments:  %d total (%.1f avg/scene)",
+            _total_segs, _total_segs / max(n_success, 1),
+        )
+        logger.info(
+            "  Sentinel:  %d collapses, %d recoveries",
+            orch_stats.get("collapsed_scenes", 0),
+            orch_stats.get("recovered_scenes", 0),
+        )
+        sentinel_stats = getattr(self, "_sentinel_stats", {})
+
+        master_metadata["stages"]["asr"] = {
+            "model_id": self.model_id,
+            "input_mode": self.input_mode.value,
+            "timestamp_mode": self.timestamp_mode.value,
+            "safe_chunking": self.safe_chunking,
+            "scenes_transcribed": sum(1 for r, _ in scene_results if r is not None and r.segments),
+            "scenes_empty": sum(1 for r, _ in scene_results if r is not None and not r.segments),
+            "scenes_failed": sum(1 for r, _ in scene_results if r is None),
+            "alignment_collapses": sentinel_stats.get("alignment_collapses", 0),
+            "alignment_recoveries": sentinel_stats.get("alignment_recoveries", 0),
+            "time_sec": time.time() - phase5_start,
+        }
+        logger.info("[QwenPipeline PID %s] Phase 5: Complete (%.1fs)", os.getpid(), time.time() - phase5_start)
+        self._emit_batch_status(
+            "Phase 5 GPU转录完成："
+            f"{master_metadata['stages']['asr']['scenes_transcribed']}个scene有字幕，"
+            f"{master_metadata['stages']['asr']['scenes_empty']}个空scene"
+        )
+
+        logger.info("[QwenPipeline PID %s] Phase 6: Generating scene SRT files", os.getpid())
+        self._emit_batch_status("Phase 6 生成scene SRT")
+        scene_srts_dir = self.temp_dir / "scene_srts"
+        scene_srts_dir.mkdir(exist_ok=True)
+        scene_srt_info: List[Tuple[Path, float]] = []
+
+        for result, idx in scene_results:
+            if result is None or not result.segments:
+                continue
+
+            _scene_path, start_sec, _end_sec, _dur_sec = scene_paths[idx]
+            scene_srt_path = scene_srts_dir / f"{media_basename}_scene_{idx:04d}.srt"
+
+            try:
+                _write_scene_srt(result, scene_srt_path)
+
+                if scene_srt_path.exists() and scene_srt_path.stat().st_size > 0:
+                    scene_srt_info.append((scene_srt_path, start_sec))
+                    logger.debug(f"Phase 6: Generated {scene_srt_path.name}")
+                else:
+                    logger.warning(f"Phase 6: Scene {idx + 1} SRT is empty after generation")
+            except Exception as e:
+                logger.warning(f"Phase 6: Failed to generate SRT for scene {idx + 1}: {e}")
+        self._emit_batch_status(f"Phase 6 生成scene SRT完成：{len(scene_srt_info)}个文件")
+
+        logger.info("[QwenPipeline PID %s] Phase 7: Stitching %d scene SRTs", os.getpid(), len(scene_srt_info))
+        self._emit_batch_status(f"Phase 7 合并SRT：{len(scene_srt_info)}个scene文件")
+        stitched_srt_path = self.temp_dir / f"{media_basename}_stitched.srt"
+
+        if scene_srt_info:
+            num_subtitles = self.stitcher.stitch(scene_srt_info, stitched_srt_path)
+            logger.info("[QwenPipeline PID %s] Phase 7: Stitched %d subtitles", os.getpid(), num_subtitles)
+        else:
+            stitched_srt_path.write_text("", encoding="utf-8")
+            num_subtitles = 0
+            logger.warning("[QwenPipeline PID %s] Phase 7: No scene SRTs to stitch (0 subtitles)", os.getpid())
+
+        master_metadata["stages"]["stitching"] = {
+            "total_subtitles": num_subtitles,
+            "scenes_contributed": len(scene_srt_info),
+        }
+        self._emit_batch_status(f"Phase 7 合并SRT完成：{num_subtitles}条字幕")
+
+        phase8_start = time.time()
+        anime_filter_stats = None
+        self._emit_batch_status("Phase 8 清理字幕")
+        if self.generator_backend == "anime-whisper" and num_subtitles > 0:
+            from whisperjav.modules.subtitle_pipeline.cleaners.anime_whisper import (
+                AnimeWhisperCleaner,
+            )
+            anime_filter_stats = AnimeWhisperCleaner().filter_srt_file(stitched_srt_path)
+            num_subtitles = anime_filter_stats["final_count"]
+            logger.info(
+                "[QwenPipeline PID %s] Phase 8: anime SRT filter — %d → %d entries "
+                "(-%d ellipsis-only, -%d empty)",
+                os.getpid(),
+                anime_filter_stats["original_count"],
+                anime_filter_stats["final_count"],
+                anime_filter_stats["dropped_ellipsis"],
+                anime_filter_stats["dropped_empty"],
+            )
+        else:
+            logger.info(
+                "[QwenPipeline PID %s] Phase 8: Skipped (legacy sanitizer disabled for Qwen)",
+                os.getpid(),
+            )
+
+        final_srt_path = self.output_dir / f"{media_basename}.{self.lang_code}.whisperjav.srt"
+
+        if num_subtitles > 0:
+            shutil.copy2(stitched_srt_path, final_srt_path)
+            stats = {"total_subtitles": num_subtitles, "sanitizer_skipped": True}
+            if anime_filter_stats:
+                stats["anime_ellipsis_dropped"] = anime_filter_stats["dropped_ellipsis"]
+                stats["anime_empty_dropped"] = anime_filter_stats["dropped_empty"]
+            processed_path = final_srt_path
+            logger.info(
+                "[QwenPipeline PID %s] Phase 8: %d subtitles in final output",
+                os.getpid(), num_subtitles,
+            )
+        else:
+            final_srt_path.write_text("", encoding="utf-8")
+            stats = {"total_subtitles": 0}
+            processed_path = final_srt_path
+
+        master_metadata["stages"]["sanitisation"] = {
+            "stats": stats,
+            "time_sec": time.time() - phase8_start,
+        }
+        self._emit_batch_status(f"Phase 8 清理字幕完成：{num_subtitles}条字幕")
+        master_metadata["srt_path"] = str(processed_path)
+        master_metadata["output_files"]["final_srt"] = str(final_srt_path)
+        master_metadata["output_files"]["stitched_srt"] = str(stitched_srt_path)
+        master_metadata["summary"]["final_subtitles_refined"] = (
+            stats.get("total_subtitles", 0) - stats.get("empty_removed", 0)
+        )
+        master_metadata["summary"]["final_subtitles_raw"] = num_subtitles
+        master_metadata["summary"]["quality_metrics"] = {
+            "hallucinations_removed": stats.get("removed_hallucinations", 0),
+            "repetitions_removed": stats.get("removed_repetitions", 0),
+            "duration_adjustments": stats.get("duration_adjustments", 0),
+            "empty_removed": stats.get("empty_removed", 0),
+            "cps_filtered": stats.get("cps_filtered", 0),
+            "logprob_filtered": 0,
+            "nonverbal_filtered": 0,
+        }
+
+        try:
+            from whisperjav.modules.pipeline_analytics import (
+                compute_analytics,
+                print_summary,
+                save_analytics,
+            )
+            analytics = compute_analytics(
+                raw_subs_dir, final_srt_path, title=media_basename,
+            )
+            print_summary(analytics, title=media_basename)
+
+            analytics_path = final_srt_path.with_suffix(".analytics.json")
+            save_analytics(analytics, analytics_path)
+            master_metadata["output_files"]["analytics"] = str(analytics_path)
+        except Exception as e:
+            logger.debug("Phase 9: Analytics failed (non-fatal): %s", e)
+
+        total_time = time.time() - pipeline_start
+        master_metadata["total_time_sec"] = total_time
+        master_metadata["summary"]["total_processing_time_seconds"] = round(total_time, 2)
+
+        logger.info(
+            "[QwenPipeline PID %s] Complete: %s (%d subtitles in %s)",
+            os.getpid(),
+            final_srt_path.name,
+            master_metadata["summary"]["final_subtitles_refined"],
+            str(timedelta(seconds=int(total_time))),
+        )
+        self._emit_batch_status(
+            "ASR完成："
+            f"{final_srt_path.name}，"
+            f"{master_metadata['summary']['final_subtitles_refined']}条字幕，"
+            f"耗时{str(timedelta(seconds=int(total_time)))}"
+        )
+
+        if self.save_metadata_json:
+            self.metadata_manager.save_master_metadata(master_metadata, media_basename)
+
+        self.cleanup_temp_files(media_basename)
+        return master_metadata
 
     def process(self, media_info: Dict) -> Dict:
         """
@@ -932,12 +1434,7 @@ class QwenPipeline(BasePipeline):
             scene_srt_path = scene_srts_dir / f"{media_basename}_scene_{idx:04d}.srt"
 
             try:
-                result.to_srt_vtt(
-                    str(scene_srt_path),
-                    word_level=False,
-                    segment_level=True,
-                    strip=True,
-                )
+                _write_scene_srt(result, scene_srt_path)
 
                 if scene_srt_path.exists() and scene_srt_path.stat().st_size > 0:
                     scene_srt_info.append((scene_srt_path, start_sec))
@@ -1094,4 +1591,3 @@ class QwenPipeline(BasePipeline):
         self.cleanup_temp_files(media_basename)
 
         return master_metadata
-

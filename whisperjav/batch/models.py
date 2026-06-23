@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
+AsrMode = Literal["subprocess", "staged"]
+
 BatchStatus = Literal[
     "skip_external_subtitle",
     "skip_duration_limit",
@@ -14,6 +16,8 @@ BatchStatus = Literal[
     "failed_translation",
     "failed_precondition",
     "cancelled",
+    "deferred_time_limit",
+    "deferred_gpu_error_limit",
     "completed",
     "completed_translation_only",
 ]
@@ -31,8 +35,12 @@ class BatchOptions:
     translate_workers: int = 1
     translation_queue_size: int = 2
     asr_retries: int = 1
+    asr_mode: AsrMode = "subprocess"
+    asr_cpu_workers: int = 1
     translation_retries: int = 2
     max_video_minutes: float = 230
+    run_minutes: float | None = None
+    max_consecutive_gpu_errors: int = 3
     stream: bool = False
     no_progress: bool = False
     debug: bool = False

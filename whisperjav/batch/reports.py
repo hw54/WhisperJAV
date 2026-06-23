@@ -174,7 +174,10 @@ def _path_or_none(path: Path | None) -> str | None:
 
 
 def _is_failed(result: VideoResult) -> bool:
-    return result.status.startswith("failed_") or result.status == "cancelled"
+    return (
+        result.status.startswith("failed_")
+        or result.status in {"cancelled", "deferred_gpu_error_limit"}
+    )
 
 
 def _utc_timestamp() -> str:

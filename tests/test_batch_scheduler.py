@@ -392,6 +392,57 @@ def test_asr_failure_does_not_enqueue_translation(tmp_path: Path) -> None:
     assert len(runner.commands) == 2
 
 
+class HipFailRunner(FakeRunner):
+    def _run_asr(self, command: list[str]) -> ProcessResult:
+        return ProcessResult(
+            return_code=9,
+            command_redacted=command,
+            stderr_tail="HIP error: unspecified launch failure",
+        )
+
+
+def test_subprocess_asr_stops_scheduling_after_consecutive_gpu_errors(
+    tmp_path: Path,
+) -> None:
+    first = tmp_path / "FIRST.mp4"
+    second = tmp_path / "SECOND.mp4"
+    third = tmp_path / "THIRD.mp4"
+    for video in (first, second, third):
+        video.write_text("video", encoding="utf-8")
+    items = [
+        ClassifiedVideo(video_path=first, status="transcribe_then_translate"),
+        ClassifiedVideo(video_path=second, status="transcribe_then_translate"),
+        ClassifiedVideo(video_path=third, status="transcribe_then_translate"),
+    ]
+    runner = HipFailRunner()
+    progress = RecordingProgress()
+
+    results = BatchScheduler(
+        BatchOptions(
+            root=tmp_path,
+            asr_retries=0,
+            max_consecutive_gpu_errors=2,
+        ),
+        runner=runner,
+        progress=progress,
+    ).run(items)
+
+    assert [result.status for result in results] == [
+        "failed_asr",
+        "failed_asr",
+        "deferred_gpu_error_limit",
+    ]
+    assert results[2].reason == "consecutive_gpu_asr_errors"
+    assert [Path(command[4]).name for command in runner.commands] == [
+        "FIRST.mp4",
+        "SECOND.mp4",
+    ]
+    assert "连续GPU运行时错误达到2次，停止安排新的ASR任务。" in progress.messages
+    assert progress.events.count(("asr", "deferred", "THIRD.mp4")) == 1
+    assert progress.events.count(("translation", "deferred", "THIRD.mp4")) == 1
+    assert progress.events.count(("files", "deferred_gpu_error_limit", "THIRD.mp4")) == 1
+
+
 class FlakyAsrRunner(FakeRunner):
     def __init__(self) -> None:
         super().__init__()
@@ -756,6 +807,25 @@ class InterruptingRunner(FakeRunner):
         self.terminated = True
 
 
+class TimelineInterruptingRunner(FakeRunner):
+    def __init__(self, timeline: list[tuple[str, str]]) -> None:
+        super().__init__()
+        self.timeline = timeline
+
+    def run(
+        self,
+        command: Sequence[str],
+        *,
+        env: Mapping[str, str] | None = None,
+        heartbeat=None,
+        heartbeat_interval_seconds: float | None = None,
+    ) -> ProcessResult:
+        raise KeyboardInterrupt
+
+    def terminate_all(self) -> None:
+        self.timeline.append(("runner", "terminated"))
+
+
 def test_keyboard_interrupt_marks_unfinished_items_cancelled(tmp_path: Path) -> None:
     first = tmp_path / "ABC-123.mp4"
     second = tmp_path / "DEF-456.mp4"
@@ -772,3 +842,47 @@ def test_keyboard_interrupt_marks_unfinished_items_cancelled(tmp_path: Path) -> 
     assert [result.status for result in results] == ["cancelled", "cancelled"]
     assert [result.reason for result in results] == ["interrupted", "interrupted"]
     assert runner.terminated
+
+
+def test_keyboard_interrupt_logs_cleanup_start_before_termination_and_completion(
+    tmp_path: Path,
+) -> None:
+    video = tmp_path / "ABC-123.mp4"
+    video.write_text("video", encoding="utf-8")
+    item = ClassifiedVideo(video_path=video, status="transcribe_then_translate")
+    progress = RecordingProgress()
+    runner = TimelineInterruptingRunner(progress.timeline)
+
+    results = BatchScheduler(
+        BatchOptions(root=tmp_path),
+        runner=runner,
+        progress=progress,
+    ).run([item])
+
+    assert results[0].status == "cancelled"
+    assert "正在清理产物……" in progress.messages
+    assert "清理产物完成。" in progress.messages
+    assert progress.timeline.index(("message", "正在清理产物……")) < progress.timeline.index(
+        ("runner", "terminated")
+    )
+    assert progress.timeline[-1] == ("message", "清理产物完成。")
+
+
+def test_keyboard_interrupt_logs_cleanup_to_stderr_without_progress(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    video = tmp_path / "ABC-123.mp4"
+    video.write_text("video", encoding="utf-8")
+    item = ClassifiedVideo(video_path=video, status="transcribe_then_translate")
+
+    results = BatchScheduler(
+        BatchOptions(root=tmp_path),
+        runner=InterruptingRunner(),
+    ).run([item])
+
+    assert results[0].status == "cancelled"
+    captured = capsys.readouterr()
+    assert "正在清理产物……" in captured.err
+    assert "清理产物完成。" in captured.err
+    assert captured.err.index("正在清理产物……") < captured.err.index("清理产物完成。")

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 
 from .commands import expected_translation_path
@@ -20,6 +21,13 @@ SRT_TIMING_PATTERN = re.compile(
     r"(?P<start>\d{2}:\d{2}:\d{2},\d{3})\s+-->\s+"
     r"(?P<end>\d{2}:\d{2}:\d{2},\d{3})"
 )
+
+
+@dataclass(frozen=True)
+class DurationCheck:
+    blocked: ClassifiedVideo | None
+    duration_seconds: float | None
+    duration_limit_minutes: float | None
 
 
 def discover_media_files(root: Path, *, include_audio: bool = False) -> list[Path]:
@@ -94,12 +102,17 @@ def classify_video(video_path: Path, options: BatchOptions) -> ClassifiedVideo:
             chinese_srt=chinese,
         )
 
-    duration_guard = _classify_duration_limit(video_path, options)
-    if duration_guard is not None:
-        return duration_guard
+    duration_check = _classify_duration_limit(video_path, options)
+    if duration_check.blocked is not None:
+        return duration_check.blocked
 
     if options.force:
-        return ClassifiedVideo(video_path=video_path, status="transcribe_then_translate")
+        return ClassifiedVideo(
+            video_path=video_path,
+            status="transcribe_then_translate",
+            duration_seconds=duration_check.duration_seconds,
+            duration_limit_minutes=duration_check.duration_limit_minutes,
+        )
 
     if options.force_translate and japanese is None:
         return ClassifiedVideo(
@@ -113,6 +126,8 @@ def classify_video(video_path: Path, options: BatchOptions) -> ClassifiedVideo:
             video_path=video_path,
             status="translate_existing_japanese",
             japanese_srt=japanese,
+            duration_seconds=duration_check.duration_seconds,
+            duration_limit_minutes=duration_check.duration_limit_minutes,
         )
 
     if japanese is not None:
@@ -121,6 +136,8 @@ def classify_video(video_path: Path, options: BatchOptions) -> ClassifiedVideo:
             status="translate_existing_japanese",
             reason="invalid_existing_translation" if invalid_translation else None,
             japanese_srt=japanese,
+            duration_seconds=duration_check.duration_seconds,
+            duration_limit_minutes=duration_check.duration_limit_minutes,
         )
 
     if options.force_translate:
@@ -134,29 +151,43 @@ def classify_video(video_path: Path, options: BatchOptions) -> ClassifiedVideo:
         video_path=video_path,
         status="transcribe_then_translate",
         reason="invalid_existing_translation" if invalid_translation else None,
+        duration_seconds=duration_check.duration_seconds,
+        duration_limit_minutes=duration_check.duration_limit_minutes,
     )
 
 
-def _classify_duration_limit(video_path: Path, options: BatchOptions) -> ClassifiedVideo | None:
+def _classify_duration_limit(video_path: Path, options: BatchOptions) -> DurationCheck:
     if options.max_video_minutes <= 0:
-        return None
+        return DurationCheck(blocked=None, duration_seconds=None, duration_limit_minutes=None)
     try:
         duration_seconds = _probe_duration_seconds(video_path)
     except RuntimeError as exc:
-        return ClassifiedVideo(
-            video_path=video_path,
-            status="failed_precondition",
-            reason="duration_unavailable",
-            warnings=(str(exc),),
+        return DurationCheck(
+            blocked=ClassifiedVideo(
+                video_path=video_path,
+                status="failed_precondition",
+                reason="duration_unavailable",
+                warnings=(str(exc),),
+            ),
+            duration_seconds=None,
+            duration_limit_minutes=None,
         )
 
     limit_seconds = options.max_video_minutes * 60
     if duration_seconds <= limit_seconds:
-        return None
-    return ClassifiedVideo(
-        video_path=video_path,
-        status="skip_duration_limit",
-        reason="duration_exceeds_limit",
+        return DurationCheck(
+            blocked=None,
+            duration_seconds=duration_seconds,
+            duration_limit_minutes=options.max_video_minutes,
+        )
+    return DurationCheck(
+        blocked=ClassifiedVideo(
+            video_path=video_path,
+            status="skip_duration_limit",
+            reason="duration_exceeds_limit",
+            duration_seconds=duration_seconds,
+            duration_limit_minutes=options.max_video_minutes,
+        ),
         duration_seconds=duration_seconds,
         duration_limit_minutes=options.max_video_minutes,
     )

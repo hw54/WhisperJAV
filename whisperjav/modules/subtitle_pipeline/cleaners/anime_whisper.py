@@ -97,13 +97,14 @@ class AnimeWhisperCleaner:
                 n_ellipsis_dropped += 1
             cleaned.append(c)
 
-        # Batch summary logging
+        # Per-batch details are useful for diagnostics but too noisy for
+        # normal batch runs because this is called once per scene.
         n_items = len(texts)
         raw_chars = sum(len(t) for t in texts)
         clean_chars = sum(len(t) for t in cleaned)
         n_modified = sum(1 for r, c in zip(texts, cleaned) if r != c)
         if n_modified > 0:
-            logger.info(
+            logger.debug(
                 "[AnimeWhisperCleaner] Cleaned %d/%d items — %d → %d chars (-%d)",
                 n_modified, n_items, raw_chars, clean_chars, raw_chars - clean_chars,
             )
@@ -113,7 +114,7 @@ class AnimeWhisperCleaner:
                 n_items, raw_chars,
             )
         if n_ellipsis_dropped > 0:
-            logger.info(
+            logger.debug(
                 "[AnimeWhisperCleaner] Dropped %d ellipsis-only segment(s)",
                 n_ellipsis_dropped,
             )

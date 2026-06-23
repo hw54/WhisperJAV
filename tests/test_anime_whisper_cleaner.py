@@ -5,6 +5,7 @@ filter_srt_file() method (SRT-level: drop + renumber).
 """
 
 from pathlib import Path
+import logging
 
 import pytest
 
@@ -154,6 +155,19 @@ class TestCleanBatchEllipsisReporting:
         texts = ["…", "…?", "…」", "‥", "...", "……"]
         out = cleaner.clean_batch(texts)
         assert all(c == "" for c in out)
+
+    def test_per_batch_cleaning_details_are_not_info_logs(self, cleaner, caplog):
+        texts = ["これは。", "…", "そうです"]
+
+        with caplog.at_level(logging.INFO, logger="whisperjav"):
+            cleaner.clean_batch(texts)
+
+        info_messages = [
+            record.message for record in caplog.records
+            if record.name == "whisperjav" and record.levelno == logging.INFO
+        ]
+        assert not any("[AnimeWhisperCleaner] Cleaned" in msg for msg in info_messages)
+        assert not any("[AnimeWhisperCleaner] Dropped" in msg for msg in info_messages)
 
 
 # ===========================================================================

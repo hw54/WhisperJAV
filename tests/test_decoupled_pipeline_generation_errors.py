@@ -1,6 +1,7 @@
 import numpy as np
 import pytest
 import soundfile as sf
+import logging
 
 from whisperjav.modules.subtitle_pipeline.orchestrator import DecoupledSubtitlePipeline
 from whisperjav.modules.subtitle_pipeline.types import (
@@ -178,3 +179,28 @@ def test_framer_resources_are_released_before_generator_load(tmp_path):
     pipeline.process_scenes([audio_path], [1.0])
 
     assert events.index("framer.cleanup") < events.index("generator.load")
+
+
+def test_per_scene_reconstruction_progress_is_not_info_log(tmp_path, caplog):
+    audio_path = tmp_path / "scene.wav"
+    sf.write(str(audio_path), np.zeros(16000, dtype=np.float32), 16000)
+
+    pipeline = DecoupledSubtitlePipeline(
+        framer=_SingleFrameFramer(),
+        generator=_SuccessfulGenerator([]),
+        cleaner=_Cleaner(),
+        aligner=None,
+        hardening_config=HardeningConfig(timestamp_mode=TimestampMode.VAD_ONLY),
+    )
+
+    with caplog.at_level(logging.INFO, logger="whisperjav"):
+        pipeline.process_scenes([audio_path], [1.0])
+
+    info_messages = [
+        record.message for record in caplog.records
+        if record.name == "whisperjav" and record.levelno == logging.INFO
+    ]
+    assert not any(
+        message.startswith("[DecoupledPipeline] Scene 1/1:")
+        for message in info_messages
+    )

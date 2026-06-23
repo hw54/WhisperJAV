@@ -240,6 +240,24 @@ def test_default_duration_limit_skips_videos_over_230_minutes(tmp_path, monkeypa
     assert item.duration_limit_minutes == 230
 
 
+def test_duration_limit_keeps_duration_for_processable_video(tmp_path, monkeypatch):
+    video = tmp_path / "ABC-123.mp4"
+    video.write_text("video", encoding="utf-8")
+    duration_seconds = 120 * 60
+    monkeypatch.setattr(
+        discovery,
+        "_probe_duration_seconds",
+        lambda _path: duration_seconds,
+        raising=False,
+    )
+
+    item = discovery.classify_video(video, BatchOptions(root=tmp_path))
+
+    assert item.status == "transcribe_then_translate"
+    assert item.duration_seconds == duration_seconds
+    assert item.duration_limit_minutes == 230
+
+
 def test_zero_duration_limit_disables_duration_probe(tmp_path, monkeypatch):
     video = tmp_path / "LONG-001.mp4"
     video.write_text("video")

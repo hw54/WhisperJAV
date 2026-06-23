@@ -56,6 +56,10 @@ def test_amd_batch_main_passes_one_directory_to_batch_cli(tmp_path, monkeypatch)
             str(tmp_path),
             "--asr-retries",
             "1",
+            "--asr-mode",
+            "subprocess",
+            "--asr-cpu-workers",
+            "1",
             "--translation-retries",
             "2",
             "--translate-workers",
@@ -92,6 +96,10 @@ def test_amd_batch_main_passes_multiple_directories_to_batch_cli(tmp_path, monke
             str(third),
             "--asr-retries",
             "1",
+            "--asr-mode",
+            "subprocess",
+            "--asr-cpu-workers",
+            "1",
             "--translation-retries",
             "2",
             "--translate-workers",
@@ -119,6 +127,10 @@ def test_amd_batch_main_passes_custom_translate_workers_to_batch_cli(tmp_path, m
             str(tmp_path),
             "--asr-retries",
             "1",
+            "--asr-mode",
+            "subprocess",
+            "--asr-cpu-workers",
+            "1",
             "--translation-retries",
             "2",
             "--translate-workers",
@@ -127,6 +139,54 @@ def test_amd_batch_main_passes_custom_translate_workers_to_batch_cli(tmp_path, m
             "2",
         ]
     ]
+
+
+def test_amd_batch_main_passes_custom_asr_cpu_workers_to_batch_cli(tmp_path, monkeypatch) -> None:
+    calls: list[list[str]] = []
+    monkeypatch.setattr(amd_cli, "reexec_with_render_group_if_needed", lambda _argv, *, env: None)
+    monkeypatch.setattr(
+        amd_cli.batch_cli,
+        "main",
+        lambda argv: calls.append(list(argv)) or 0,
+    )
+
+    code = amd_cli.main([str(tmp_path), "--asr-cpu-workers", "3"])
+
+    assert code == 0
+    assert calls[0][calls[0].index("--asr-cpu-workers") + 1] == "3"
+
+
+def test_amd_batch_main_passes_run_minutes_to_batch_cli(tmp_path, monkeypatch) -> None:
+    calls: list[list[str]] = []
+    monkeypatch.setattr(amd_cli, "reexec_with_render_group_if_needed", lambda _argv, *, env: None)
+    monkeypatch.setattr(
+        amd_cli.batch_cli,
+        "main",
+        lambda argv: calls.append(list(argv)) or 0,
+    )
+
+    code = amd_cli.main([str(tmp_path), "--run-minutes", "45"])
+
+    assert code == 0
+    assert calls[0][calls[0].index("--run-minutes") + 1] == "45"
+
+
+def test_amd_batch_main_passes_max_consecutive_gpu_errors_to_batch_cli(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    calls: list[list[str]] = []
+    monkeypatch.setattr(amd_cli, "reexec_with_render_group_if_needed", lambda _argv, *, env: None)
+    monkeypatch.setattr(
+        amd_cli.batch_cli,
+        "main",
+        lambda argv: calls.append(list(argv)) or 0,
+    )
+
+    code = amd_cli.main([str(tmp_path), "--max-consecutive-gpu-errors", "2"])
+
+    assert code == 0
+    assert calls[0][calls[0].index("--max-consecutive-gpu-errors") + 1] == "2"
 
 
 def test_amd_batch_main_accepts_twenty_translate_workers(tmp_path, monkeypatch) -> None:
@@ -142,6 +202,8 @@ def test_amd_batch_main_accepts_twenty_translate_workers(tmp_path, monkeypatch) 
 
     assert code == 0
     assert calls[0][calls[0].index("--translate-workers") + 1] == "20"
+    assert calls[0][calls[0].index("--asr-mode") + 1] == "subprocess"
+    assert calls[0][calls[0].index("--asr-cpu-workers") + 1] == "1"
     assert calls[0][calls[0].index("--translation-queue-size") + 1] == "21"
 
 
@@ -158,6 +220,8 @@ def test_amd_batch_main_accepts_hundred_translate_workers(tmp_path, monkeypatch)
 
     assert code == 0
     assert calls[0][calls[0].index("--translate-workers") + 1] == "100"
+    assert calls[0][calls[0].index("--asr-mode") + 1] == "subprocess"
+    assert calls[0][calls[0].index("--asr-cpu-workers") + 1] == "1"
     assert calls[0][calls[0].index("--translation-queue-size") + 1] == "101"
 
 
@@ -181,6 +245,10 @@ def test_amd_batch_main_passes_custom_translation_queue_size_to_batch_cli(
         [
             str(tmp_path),
             "--asr-retries",
+            "1",
+            "--asr-mode",
+            "subprocess",
+            "--asr-cpu-workers",
             "1",
             "--translation-retries",
             "2",
@@ -209,6 +277,10 @@ def test_amd_batch_main_passes_custom_duration_limit_to_batch_cli(tmp_path, monk
             str(tmp_path),
             "--asr-retries",
             "1",
+            "--asr-mode",
+            "subprocess",
+            "--asr-cpu-workers",
+            "1",
             "--translation-retries",
             "2",
             "--translate-workers",
@@ -234,6 +306,21 @@ def test_amd_batch_main_passes_stream_to_batch_cli_when_requested(tmp_path, monk
 
     assert code == 0
     assert "--stream" in calls[0]
+
+
+def test_amd_batch_main_allows_explicit_staged_asr_mode(tmp_path, monkeypatch) -> None:
+    calls: list[list[str]] = []
+    monkeypatch.setattr(amd_cli, "reexec_with_render_group_if_needed", lambda _argv, *, env: None)
+    monkeypatch.setattr(
+        amd_cli.batch_cli,
+        "main",
+        lambda argv: calls.append(list(argv)) or 0,
+    )
+
+    code = amd_cli.main([str(tmp_path), "--asr-mode", "staged"])
+
+    assert code == 0
+    assert calls[0][calls[0].index("--asr-mode") + 1] == "staged"
 
 
 def test_reexecs_through_render_group_when_kfd_is_inaccessible(tmp_path, monkeypatch) -> None:

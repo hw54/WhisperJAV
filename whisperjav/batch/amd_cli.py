@@ -16,9 +16,9 @@ MIGRAPHX_MODEL_CACHE_SUBDIR = Path("whisperjav") / "migraphx"
 AMD_BATCH_ARGS = (
     "--asr-retries",
     "1",
-    "--translation-retries",
-    "2",
 )
+AMD_DEFAULT_ASR_MODE = "subprocess"
+AMD_DEFAULT_ASR_CPU_WORKERS = 1
 AMD_DEFAULT_TRANSLATE_WORKERS = 20
 AMD_TRANSLATION_QUEUE_AHEAD = 1
 _REEXEC_MARKER = "WHISPERJAV_AMD_BATCH_SG"
@@ -30,14 +30,26 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         description="AMD APU one-command batch transcription and translation."
     )
     parser.add_argument("roots", nargs="+", type=Path)
-    parser.add_argument("--max-video-minutes", type=_nonnegative_minutes)
+    parser.add_argument("--max-video-minutes", type=_max_video_minutes)
+    parser.add_argument("--run-minutes", type=_run_minutes)
     parser.add_argument("--stream", action="store_true")
+    parser.add_argument(
+        "--asr-mode",
+        choices=("subprocess", "staged"),
+        default=AMD_DEFAULT_ASR_MODE,
+    )
+    parser.add_argument(
+        "--asr-cpu-workers",
+        type=_positive_int,
+        default=AMD_DEFAULT_ASR_CPU_WORKERS,
+    )
     parser.add_argument(
         "--translate-workers",
         type=_translate_workers,
         default=AMD_DEFAULT_TRANSLATE_WORKERS,
     )
     parser.add_argument("--translation-queue-size", type=_positive_int)
+    parser.add_argument("--max-consecutive-gpu-errors", type=_nonnegative_int)
     return parser.parse_args(argv)
 
 
@@ -66,6 +78,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     batch_args = [
         *(str(root) for root in args.roots),
         *AMD_BATCH_ARGS,
+        "--asr-mode",
+        args.asr_mode,
+        "--asr-cpu-workers",
+        str(args.asr_cpu_workers),
+        "--translation-retries",
+        "2",
         "--translate-workers",
         str(args.translate_workers),
         "--translation-queue-size",
@@ -76,6 +94,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     ]
     if args.max_video_minutes is not None:
         batch_args.extend(["--max-video-minutes", args.max_video_minutes])
+    if args.run_minutes is not None:
+        batch_args.extend(["--run-minutes", args.run_minutes])
+    if args.max_consecutive_gpu_errors is not None:
+        batch_args.extend(
+            ["--max-consecutive-gpu-errors", str(args.max_consecutive_gpu_errors)]
+        )
     if args.stream:
         batch_args.append("--stream")
     return batch_cli.main(batch_args)
@@ -86,13 +110,21 @@ def _prepend_path(env: MutableMapping[str, str], path: str) -> None:
     env["PATH"] = os.pathsep.join([path, *[part for part in parts if part != path]])
 
 
-def _nonnegative_minutes(value: str) -> str:
+def _max_video_minutes(value: str) -> str:
+    return _nonnegative_minutes(value, "--max-video-minutes")
+
+
+def _run_minutes(value: str) -> str:
+    return _nonnegative_minutes(value, "--run-minutes")
+
+
+def _nonnegative_minutes(value: str, option: str) -> str:
     try:
         parsed = float(value)
     except ValueError as exc:
-        raise argparse.ArgumentTypeError("--max-video-minutes must be a number") from exc
+        raise argparse.ArgumentTypeError(f"{option} must be a number") from exc
     if parsed < 0:
-        raise argparse.ArgumentTypeError("--max-video-minutes must be at least 0")
+        raise argparse.ArgumentTypeError(f"{option} must be at least 0")
     return value
 
 
@@ -110,9 +142,19 @@ def _positive_int(value: str) -> int:
     try:
         parsed = int(value)
     except ValueError as exc:
-        raise argparse.ArgumentTypeError("--translation-queue-size must be an integer") from exc
+        raise argparse.ArgumentTypeError("value must be an integer") from exc
     if parsed < 1:
-        raise argparse.ArgumentTypeError("--translation-queue-size must be at least 1")
+        raise argparse.ArgumentTypeError("value must be at least 1")
+    return parsed
+
+
+def _nonnegative_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("value must be an integer") from exc
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("value must be at least 0")
     return parsed
 
 

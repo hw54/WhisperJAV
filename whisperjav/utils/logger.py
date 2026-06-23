@@ -3,8 +3,9 @@
 
 import logging
 import sys
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional
+from typing import Iterator, Optional, TextIO
 
 try:  # pragma: no cover - best-effort import for color support
     from colorama import Fore, Style, init as colorama_init
@@ -63,6 +64,57 @@ class ColorFormatter(logging.Formatter):
             return formatted
 
         return color_text(formatted, color)
+
+
+class TqdmLoggingHandler(logging.StreamHandler):
+    """Console logging handler that writes without corrupting tqdm bars."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            from tqdm import tqdm
+
+            msg = self.format(record)
+            tqdm.write(msg, file=self.stream)
+            self.flush()
+        except Exception:
+            self.handleError(record)
+
+
+@contextmanager
+def tqdm_console_logging(
+    name: str = "whisperjav",
+    *,
+    file: TextIO | None = None,
+) -> Iterator[None]:
+    """Route console logs through tqdm.write while progress bars are active."""
+
+    logger = logging.getLogger(name)
+    original_handlers = list(logger.handlers)
+    replacement_handlers: list[logging.Handler] = []
+
+    for handler in original_handlers:
+        if _is_console_stream_handler(handler):
+            tqdm_handler = TqdmLoggingHandler(file or handler.stream)
+            tqdm_handler.setLevel(handler.level)
+            tqdm_handler.setFormatter(handler.formatter)
+            for log_filter in handler.filters:
+                tqdm_handler.addFilter(log_filter)
+            replacement_handlers.append(tqdm_handler)
+        else:
+            replacement_handlers.append(handler)
+
+    logger.handlers = replacement_handlers
+    try:
+        yield
+    finally:
+        logger.handlers = original_handlers
+
+
+def _is_console_stream_handler(handler: logging.Handler) -> bool:
+    return (
+        isinstance(handler, logging.StreamHandler)
+        and not isinstance(handler, logging.FileHandler)
+    )
 
 
 def setup_logger(name: str = "whisperjav",

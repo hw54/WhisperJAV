@@ -560,10 +560,7 @@ class DecoupledSubtitlePipeline:
                 audio_paths = frame_audio_paths[scene_idx]
                 raw_texts = []
 
-                logger.info(
-                    "[DecoupledPipeline] Generating scene %d/%d (%.1fs audio)...",
-                    scene_idx + 1, n_scenes, scene_durations[scene_idx],
-                )
+                _log_scene_generation_progress(scene_idx, n_scenes, scene_durations[scene_idx])
 
                 # Separate framer-provided and needs-generation frames
                 gen_indices = []
@@ -604,7 +601,7 @@ class DecoupledSubtitlePipeline:
                 # Per-scene generation result
                 scene_chars = sum(len(t) for t in raw_texts)
                 if scene_chars == 0:
-                    logger.info(
+                    logger.debug(
                         "[DecoupledPipeline]   Scene %d/%d: empty (no text generated)",
                         scene_idx + 1, n_scenes,
                     )
@@ -987,8 +984,9 @@ class DecoupledSubtitlePipeline:
                 segment_count = len(result.segments) if result and result.segments else 0
                 total_segments += segment_count
 
-                # Per-scene progress
-                logger.info(
+                # Per-scene diagnostics are noisy in normal batch runs; keep them
+                # available at debug level while preserving step summaries.
+                logger.debug(
                     "[DecoupledPipeline] Scene %d/%d: %d words → %d segments (sentinel: %s)",
                     scene_idx + 1, n_scenes, word_count, segment_count, sentinel_status,
                 )
@@ -1237,3 +1235,16 @@ class DecoupledSubtitlePipeline:
         if self.aligner:
             self.aligner.cleanup()
         self._cleanup_temp_files()
+
+
+def _log_scene_generation_progress(
+    scene_idx: int,
+    n_scenes: int,
+    scene_duration: float,
+) -> None:
+    logger.debug(
+        "[DecoupledPipeline] Generating scene %d/%d (%.1fs audio)...",
+        scene_idx + 1,
+        n_scenes,
+        scene_duration,
+    )
